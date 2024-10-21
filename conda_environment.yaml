@@ -1,0 +1,46 @@
+name: pyrite
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+dependencies:
+  - pytorch
+  - torchvision
+  - torchaudio
+  - pytorch-cuda=12.1
+  - huggingface_hub
+  - wandb
+  - timm
+  - diffusers
+  - accelerate
+  - threadpoolctl
+  - imagecodecs
+  - plotly
+  - dill
+  - einops
+  - hydra-core
+  - ipykernel
+  - ipython
+  - matplotlib
+  - omegaconf
+  - opencv
+  - pandas
+  - pyyaml
+  - scipy
+  - tqdm
+  - zarr
+  - spatialmath-python
+  - numcodecs
+  - scikit-video
+  - scikit-fda
+  # trick to avoid cpu affinity issue described in https://github.com/pytorch/pytorch/issues/99625
+  - llvm-openmp=14
+  - eigen=3.4
+  - cmake
+  - pybind11
+  - boost
+  # - pip:
+  #   - ur-rtde==1.5.6
+  #   - v4l2py
+  #   - toppra
