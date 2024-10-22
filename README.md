@@ -20,6 +20,7 @@ pip install v4l2py
 pip install toppra
 pip install atomics
 pip install vit-pytorch # Need at least 1.7.12, which was not available in conda
+pip install imagecodecs # Need at least 2023.9.18, which caused lots of conflicts in conda
 ```
 4. 
 
@@ -66,3 +67,9 @@ export LD_LIBRARY_PATH=$HOME/.local/lib/:$LD_LIBRARY_PATH
 ```
 You need to run `source .bashrc` or reopen a terminal for those to take effect.
 
+## Training
+### Setup Accelerator
+If you haven't done so on your machine, run:
+``` sh
+accelerate config
+```

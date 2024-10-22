@@ -197,7 +197,6 @@ dataset:
   shape_meta: *shape_meta
   dataset_path: ${task.dataset_path}
   sparse_query_frequency_down_sample_steps: 8
-  hack_linear_interpolated_dense_action: False
   # cache_dir: null
   action_padding: False
   temporally_independent_normalization: False
