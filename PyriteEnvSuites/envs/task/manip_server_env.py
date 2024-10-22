@@ -4,6 +4,7 @@ import sys
 SCRIPT_PATH = os.path.abspath(os.path.dirname(__file__))
 PACKAGE_PATH = os.path.join(SCRIPT_PATH, "../../")
 sys.path.append(os.path.join(SCRIPT_PATH, "../../../"))
+sys.path.append(os.path.join(SCRIPT_PATH, "../../../../"))
 
 from typing import Any, Callable, Dict, FrozenSet, List, Optional, Set, Tuple, Type
 import numpy as np

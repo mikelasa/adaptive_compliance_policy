@@ -40,7 +40,6 @@ dependencies:
   - cmake
   - pybind11
   - boost
-  # - pip:
-  #   - ur-rtde==1.5.6
-  #   - v4l2py
-  #   - toppra
+  - fmt
+  - spdlog
+

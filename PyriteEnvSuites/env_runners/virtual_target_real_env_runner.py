@@ -52,7 +52,7 @@ def main():
     pipeline_para = {
         "save_low_dim_every_N_frame": 1,
         "save_visual_every_N_frame": 1,
-        "ckpt_path": "2024.09.25_21.10.43_flip_up_new_resnet_230",
+        "ckpt_path": "/2024.09.25_21.10.43_flip_up_new_resnet_230",
         # "hardware_config_path": hardware_config_folder_path + "/manip_server_config_left_arm.yaml",
         "hardware_config_path": hardware_config_folder_path
         + "/manip_server_config_bimanual.yaml",
