@@ -1,13 +1,28 @@
 # adaptive_compliance_policy
 [[Project Page]](https://adaptive-compliance.github.io/)[[Paper]](https://arxiv.org/abs/2410.09309)
 
-This repo contains code for training and evaluation of the Adaptive Compliance Policy in real world. This repository also contains a guide on how to setup the data collection and robot compliance controller pipeline.
+Code and guide for training and evaluation of the Adaptive Compliance Policy in real world. This readme also describes how to setup our data collection and robot compliance controller pipeline.
 
 This repo is built on top of [universal_manipulation_interface](https://github.com/real-stanford/universal_manipulation_interface). 
 
+## How to use this repo
+This document describes how to setup our whole software system, including python code for training, modeling and c++ code for control. You may not need all of them. Below lists what is needed for a few different use cases. 
+
+### *Just checkout how ACP is implemented*
+You can start with reading the code below:
+* **Compute virtual target & stiffness label:** `adaptive_compliance_policy/PyriteEnvSuites/scripts/postprocess_add_virtual_target_label.py`
+* **Reconstruct stiffness matrix from policy outputs:** `adaptive_compliance_policy/PyriteEnvSuites/env_runners/virtual_target_real_env_runner.py`
+* **Policy implementation:** `/home/yifanhou/temp/adaptive_compliance_policy/PyriteML/diffusion_policy/policy/diffusion_unet_timm_mod1_policy.py`
+### *Train an ACP*
+You can [download our dataset](#downloads), then setup this package following the [Install](#install) section, launch training following the [Training](#training-acp) section.
+### *Try our compliance controlled data collection pipeline*
+Follows the section on [setting up our c++ code base](#setup-robot-controllers), and [data collection](#data-collection). You might also need the [data postprocessing](#data-postprocessing) if you want to train with your data.
+### *Try ACP on your own robot*
+Hardware information is abstracted away in this package. You may fork our [hardware_interfaces](https://github.com/yifan-hou/hardware_interfaces) package, add in your new devices. The interface to hardware is the ManipServer class defined in hardware_interfaces. 
+
+
 ## Downloads
 ``` sh
-mkdir data && cd data
 wget https://real.stanford.edu/adaptive-compliance/checkpoints.zip # Download all checkpoints
 wget https://real.stanford.edu/adaptive-compliance/data/flip_up_230.zip # Download processed dataset for the item flip up task
 wget https://real.stanford.edu/adaptive-compliance/data/vase_wiping_200.zip # Download processed dataset for the vase wiping task
@@ -48,7 +63,7 @@ export PYRITE_HARDWARE_CONFIG_FOLDERS=$HOME/git/RobotTestBench/applications/ur_t
 export PYRITE_CONTROL_LOG_FOLDERS=$HOME/data/control_log
 ```
 
-## Setup robot controllers (C++)
+## Setup robot controllers
 If you want to run our data collection or testing pipeline, you need to setup our c++ robot controllers.
 We provide an admittance controller implementation based on our [force_control](https://github.com/yifan-hou/force_control) package.
 
@@ -91,7 +106,8 @@ export LD_LIBRARY_PATH=$HOME/.local/lib/:$LD_LIBRARY_PATH
 ```
 You need to run `source .bashrc` or reopen a terminal for those to take effect.
 
-## Data collection (Requires robot controller setup)
+## Data collection
+(Requires robot controller setup)
 The data collection pipeline is wrapped in `hardware_interfaces/applications/manipulation_data_collection".
 1. Check the correct config file is selected in `hardware_interfaces/applications/manipulation_data_collection/src/main.cc`.
 2. Build `hardware_interfaces` follow its readme.
@@ -154,7 +170,7 @@ Or, train with multiple GPU like this
 HYDRA_FULL_ERROR=1 accelerate launch --gpu_ids 0,1,2,3 --num_processes=4 train.py --config-name=train_spec_workspace
 ```
 
-## Evaluation on real robot
+## Evaluation on real robots
 After building the `hardware_interfaces` package, a pybind library is generated under `hardware_interfaces/workcell/table_top_manip/python/`. This library contains a c++ multi-thread server that maintains low-latency communication and data/command buffers with all involved hardware. It also maintains an admittance controller. We will launch a python script that communicates with the hardware server, while the python script itself does not need multi-processing.
 
 Before testing, check the following:
