@@ -119,6 +119,7 @@ class ModelPredictiveControllerHybrid():
     def compute_sparse_control(self, device):
         """ Run sparse model inference once. Does not output control.
         """
+        # time alignment check
         time_now = time.perf_counter() + self.time_offset
         for id in self.id_list:
             dt_rgb = time_now - self.sparse_obs_last_timestamps[f"rgb_time_stamps_{id}"]
@@ -126,9 +127,14 @@ class ModelPredictiveControllerHybrid():
             dt_wrench = time_now - self.sparse_obs_last_timestamps[f"wrench_time_stamps_{id}"]
             print(f'[MPC] obs lagging for robot {id}: dt_rgb: {dt_rgb}, dt_ts_pose: {dt_ts_pose}, dt_wrench: {dt_wrench}')
 
+        # run model inference
         with torch.no_grad():
             s = time.time()
             obs_sample_np = {}
+            # convert sparse observations to model input format
+            # RGB: unpack, reshape, normalize, turn into float
+            # low dim: convert pose to relative pose, turn into float
+ 
             obs_sample_np['sparse'], SE3_WBase = task.sparse_obs_to_obs_sample(
                 obs_sparse=self.sparse_obs_data,
                 shape_meta=self.shape_meta,
@@ -144,9 +150,11 @@ class ModelPredictiveControllerHybrid():
             obs_sample = dict_apply(obs_sample_np,
                 lambda x: torch.from_numpy(x).to(device))
 
+            # inference
             result = self.policy.predict_action(obs_sample)
             raw_action = result['sparse'][0].detach().to('cpu').numpy()
             
+            # from relative action to absolute action
             action = self.action_postprocess(raw_action, SE3_WBase, self.id_list)
             printOrNot(self.verbose_level, 'Sparse inference latency:', time.time() - s)
             return action

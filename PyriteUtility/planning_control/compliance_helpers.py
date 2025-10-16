@@ -376,23 +376,28 @@ class VirtualTargetEstimator:
         #   angle: rad -> rad * m = m,  10 rad -> 1 m
         #   torque: Nm -> Nm / m = N,   10 Nm -> 100 N
         #   rotational stiffness: Nm/rad -> Nm/rad / m^2 = N / m, 1Nm/rad -> 100 N/m
+
+        # Extract forces (negative because of convention)
         f = -wrench_T[: self.dim]
         f_reg = f.copy()
+        # 
         if self.dim == 6:
             f_reg[3:] = f_reg[3:] / self.characteristic_length
 
-        # compute stiffness
+        # Compute adaptive stiffness based on force magnitude
         f_norm = np.linalg.norm(f_reg)
         if f_norm < self.f_low:
             k = self.k_max
             twist_reg_TC = np.zeros(self.dim)
         elif f_norm > self.f_high:
             k = self.k_min
+            # displacement to the virtual target (regularized)
             twist_reg_TC = f_reg / k
         else:
             k = self.k_max - (self.k_max - self.k_min) * (f_norm - self.f_low) / (
                 self.f_high - self.f_low
             )
+            # displacement to the virtual target (regularized)
             twist_reg_TC = f_reg / k
 
         # reduce influence of friction and gravity
@@ -414,6 +419,8 @@ class VirtualTargetEstimator:
             # twist_TTnew = twist_TTnew[:3]
             vel_WT = vel_WT[:3]
 
+        # if the velocity is significant, remove the component of the twist
+        # that is in the direction of the velocity
         flag_adjusted = False
         if np.linalg.norm(vel_WT) > self.vel_tol:
             # dot_product = delta_wrench_T.dot(vel_WT)
@@ -431,6 +438,7 @@ class VirtualTargetEstimator:
         twist_TC = twist_reg_TC
 
         if self.dim == 6:
+            # convert rotational units back to translational units
             twist_TC[3:] = twist_TC[3:] / self.characteristic_length
             SE3_TC = su.spt_to_SE3(twist_TC)
             return k, SE3_TC, flag_adjusted

@@ -26,7 +26,7 @@ if "PYRITE_DATASET_FOLDERS" not in os.environ:
 dataset_folder_path = os.environ.get("PYRITE_DATASET_FOLDERS")
 
 # Config for flip up (single robot)
-dataset_path = dataset_folder_path + "/flip_up_new_v5/"
+dataset_path = dataset_folder_path + "/test"
 id_list = [0]
 
 # # Config for vase wiping (bimanual)
@@ -36,18 +36,19 @@ id_list = [0]
 wrench_moving_average_window_size = 7000  # should be around 1s of data
 buffer = zarr.open(dataset_path, mode="r+")
 
-num_of_process = 5
-flag_plot = False
+num_of_process = 1
+flag_plot = True
 fin_every_n = 50
 
+# struct that defines the parameters to simulate the penetration with a given stiffness
 stiffness_estimation_para = {
     # penetration estimator
-    "k_max": 5000,  # 1cm 50N
-    "k_min": 200,  # 1cm 2.5N
-    "f_low": 0.5,
-    "f_high": 5,
-    "dim": 3,
-    "characteristic_length": 0.02,
+    "k_max": 5000,  # 1cm 50N maximum stiffness
+    "k_min": 200,  # 1cm 2.5N minimum stiffness
+    "f_low": 0.5, #lower bound of the force
+    "f_high": 5,  #upper bound of the force
+    "dim": 3, #3 or 6, 3 for translational, 6 for full 6D
+    "characteristic_length": 0.02, #the characteristic length for rotational stiffness
     "vel_tol": 999.002,  # (not using) vel larger than this will trigger stiffness adjustment
 }
 
@@ -60,11 +61,14 @@ if flag_plot:
 
 
 def process_episode(ep, ep_data, id_list):
+    #for each episode, for robot in id_list:
     for id in id_list:
         print(f"Processing episode {ep}, id {id}: ")
+        #extract robot pose and wrench
         ts_pose_fb = ep_data[f"ts_pose_fb_{id}"]
         wrench = ep_data[f"wrench_{id}"]
 
+        # pre-allocate moving average array
         wrench_moving_average = np.zeros_like(wrench)
 
         # remove wrench measurement offset
@@ -119,6 +123,7 @@ def process_episode(ep, ep_data, id_list):
             # find the id in wrench_time_stamps where the time is closest to robot_time_stamps[t]
             t_wrench = np.argmin(np.abs(wrench_time_stamps - robot_time_stamps[t]))
 
+            #apply moving average 
             if flag_real:
                 wrench_T = wrench_moving_average[t_wrench]
             else:
@@ -128,12 +133,13 @@ def process_episode(ep, ep_data, id_list):
                 SE3_ST = SE3_WS.inv() * SE3_WT
                 wrench_T = SE3_ST.Ad().T @ wrench_S
 
-            # compute velocity twist
+            # compute velocity twist with a window of 20 time steps (10 before and 10 after)
             half_window_size = 10
             id_start = max(0, t - half_window_size)
             id_end = min(num_robot_time_steps - 1, t + half_window_size)
             window_size = id_end - id_start
 
+            # compute twist rel_pose =  inv(SE3_start) * SE3_end
             SE3_start = su.pose7_to_SE3(ts_pose_fb[id_start])
             SE3_end = su.pose7_to_SE3(ts_pose_fb[id_end])
             twist_diff = su.SE3_to_spt(su.SE3_inv(SE3_start) @ SE3_end)
@@ -240,7 +246,7 @@ def process_episode(ep, ep_data, id_list):
             input("Press Enter to continue...")
             return True
 
-
+# dependign the number of processes, 
 if num_of_process == 1:
     for ep, ep_data in tqdm(buffer["data"].items(), desc="Episodes"):
         process_episode(ep, ep_data, id_list)

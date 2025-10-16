@@ -105,12 +105,13 @@ def main():
         20 * 1000 / pipeline_para["save_visual_every_N_frame"]
     )
     rgb_buffer_shape_nhwc = (
-        img_buffer_size_estimated,
-        image_height,
+        img_buffer_size_estimated, # number of images
+        image_height, 
         image_width,
-        3,
+        3, # rgb channels
     )
 
+    # compute query sizes based on receeding horizon.
     rgb_query_size = (
         shape_meta["sample"]["obs"]["sparse"]["rgb_0"]["horizon"] - 1
     ) * shape_meta["sample"]["obs"]["sparse"]["rgb_0"]["down_sample_steps"] + 1
@@ -128,6 +129,7 @@ def main():
         "wrench": wrench_query_size,
     }
 
+    # create the env (for wiping only?)
     env = ManipServerEnv(
         camera_res_hw=(image_height, image_width),
         hardware_config_path=pipeline_para["hardware_config_path"],
@@ -138,18 +140,24 @@ def main():
 
     env.reset()
 
+    # policy doesnt need to control robot each ms, controlling every 10ms is enough
+    # time steps are computed so that control is applied at the right time
+    # set timestep
     p_timestep_s = control_para["raw_time_step_s"]
-
+    # how many timesteps between each action step
     sparse_action_down_sample_steps = shape_meta["sample"]["action"]["sparse"][
         "down_sample_steps"
     ]
+    # action horizon: model predicted actions (Tp)
     sparse_action_horizon = shape_meta["sample"]["action"]["sparse"]["horizon"]
     sparse_action_horizon_s = (
         sparse_action_horizon * sparse_action_down_sample_steps * p_timestep_s
     )
+    # execution horizon: actual executed actions (Ta)
     sparse_execution_horizon = (
         sparse_action_down_sample_steps * control_para["sparse_execution_horizon"]
     )
+    # time stamps for executed actions in execution horizon
     sparse_action_timesteps_s = (
         np.arange(0, sparse_action_horizon)
         * sparse_action_down_sample_steps
@@ -157,6 +165,7 @@ def main():
         * control_para["slow_down_factor"]
     )
 
+    # prediction vector format: ref pose (9D) + virtual target (9D) + stiffness (1D)
     action_type = "pose9"  # "pose9" or "pose9pose9s1"
     id_list = [0]
     if shape_meta["action"]["shape"][0] == 9:
@@ -169,12 +178,14 @@ def main():
     else:
         raise RuntimeError("unsupported")
 
+    # assigning function to convert action to trajectory
     if action_type == "pose9pose9s1":
         action_to_trajectory = pose9pose9s1_to_traj
     else:
         raise RuntimeError("unsupported")
 
     printOrNot(vbs_h2, "Creating MPC.")
+    # create MPC controller: combines policy with interpolation
     controller = ModelPredictiveControllerHybrid(
         shape_meta=shape_meta,
         id_list=id_list,
@@ -182,11 +193,15 @@ def main():
         action_to_trajectory=action_to_trajectory,
         sparse_execution_horizon=sparse_execution_horizon,
     )
+    # sets a time offset between env time and controller time to align
     controller.set_time_offset(env)
 
     # timestep_idx = 0
     # stiffness = None
+    # gets time from env (robot time)
     episode_initial_time_s = env.current_hardware_time_s
+
+    #computes the time needed to execute one horizon by the MPC (180 ms)
     execution_duration_s = (
         sparse_execution_horizon * p_timestep_s * control_para["slow_down_factor"]
     )
@@ -213,7 +228,10 @@ def main():
 
     horizon_count = 0
     print("test plotting RGB. Press q to continue.")
+
+    # test camera and plot rgb
     while True:
+        # gets observation from env
         obs_raw = env.get_observation_from_buffer()
 
         # plot the rgb image
@@ -227,6 +245,7 @@ def main():
         if key == ord("q"):
             break
 
+    # get initial tool space poses
     ts_pose_initial = []
     for id in id_list:
         ts_pose_initial.append(obs_raw[f"ts_pose_fb_{id}"][-1])
@@ -236,11 +255,15 @@ def main():
     while True:
         printOrNot(vbs_h1, "New episode. Episode ID: ", episode_id)
         input("Press Enter to start the episode.")
+        # killer handles graceful shutdown
         killer = GracefulKiller()
         while not killer.kill_now:
+            # get current hardware time
             horizon_initial_time_s = env.current_hardware_time_s
             printOrNot(vbs_h1, "Starting new horizon at ", horizon_initial_time_s)
 
+            # get observation from env
+            # takes rgb images, ts poses, wrenches anda processes them into a dictionary
             obs_raw = env.get_observation_from_buffer()
 
             # plot the rgb image
@@ -252,18 +275,19 @@ def main():
             cv2.imshow("image", bgr)
             cv2.waitKey(10)
 
+            # save low dim obs named as raw in new dict called obs_task
+            # function change format and names of obs
             obs_task = dict()
             raw_to_obs(obs_raw, obs_task, shape_meta)
 
             assert action_type == "pose9pose9s1"
 
-            # Run inference
+            # set observation applies downsampling according to shape_meta
             controller.set_observation(obs_task["obs"])
-            (
-                action_sparse_target_mats,
-                action_sparse_vt_mats,
-                action_stiffnesses,
-            ) = controller.compute_sparse_control(device)
+
+            # inference: add batch size 
+            (action_sparse_target_mats, action_sparse_vt_mats, 
+             action_stiffnesses, ) = controller.compute_sparse_control(device)
 
             # for id in id_list:
             #     print(f"Stiffness {id}: ", action_stiffnesses[id])
@@ -273,7 +297,9 @@ def main():
             outputs_ts_targets = [np.array] * len(id_list)
             outputs_ts_stiffnesses = [np.array] * len(id_list)
             for id in id_list:
+                # get tool to world transform
                 SE3_TW = su.SE3_inv(su.pose7_to_SE3(obs_raw[f"ts_pose_fb_{id}"][-1]))
+                # transform from SE3 to pose7
                 ts_targets_nominal = su.SE3_to_pose7(
                     action_sparse_target_mats[id].reshape([-1, 4, 4])
                 )
@@ -282,7 +308,9 @@ def main():
                 )
 
                 ts_stiffnesses = np.zeros([6, 6 * ts_targets_virtual.shape[0]])
+                # for each target in the horizon
                 for i in range(ts_targets_virtual.shape[0]):
+                    # get target and virtual target in matrix form
                     SE3_target = action_sparse_target_mats[id][i].reshape([4, 4])
                     SE3_virtual_target = action_sparse_vt_mats[id][i].reshape([4, 4])
                     stiffness = action_stiffnesses[id][i]
@@ -292,16 +320,22 @@ def main():
                     SE3_Ttarget = SE3_TW @ SE3_target
 
                     # stiffness: 2. compute stiffness matrix in the tool frame
+                    #compute direction from target to virtual target
                     compliance_direction_tool = (
                         SE3_TVt[:3, 3] - SE3_Ttarget[:3, 3]
                     ).reshape(3)
 
+                    # if the two are too close, set X direction
                     if np.linalg.norm(compliance_direction_tool) < 0.001:  #
                         compliance_direction_tool = np.array([1.0, 0.0, 0.0])
 
+                    # normalize
                     compliance_direction_tool /= np.linalg.norm(
                         compliance_direction_tool
                     )
+
+                    # build orthonormal basis
+                    # sets compliance direction as X axis
                     X = compliance_direction_tool
                     Y = np.cross(X, np.array([0, 0, 1]))
                     Y /= np.linalg.norm(Y)
@@ -311,15 +345,19 @@ def main():
                     default_stiffness_rot = 100
                     target_stiffness = stiffness
 
+                    # defines K_0 matrix with predicted stiffnes on first position
                     M = np.diag(
                         [target_stiffness, default_stiffness, default_stiffness]
                     )
+                    # similarity matrix S
                     S = np.array([X, Y, Z]).T
+                    #computes final K eq 6
                     stiffness_matrix = S @ M @ np.linalg.inv(S)
                     stiffness_matrix_full = np.eye(6) * default_stiffness_rot
                     stiffness_matrix_full[:3, :3] = stiffness_matrix
                     ts_stiffnesses[:, 6 * i : 6 * i + 6] = stiffness_matrix_full
 
+                # final action (pose_ref, virtual_target and K)
                 outputs_ts_nominal_targets[id] = ts_targets_nominal
                 outputs_ts_targets[id] = ts_targets_virtual
                 outputs_ts_stiffnesses[id] = ts_stiffnesses
@@ -440,6 +478,7 @@ def main():
                     outputs_ts_stiffnesses
                 )  # 6 x (6xN) to 12 x (6xN)
 
+            # send to env for execution
             env.schedule_controls(
                 pose7_cmd=outputs_ts_targets,
                 stiffness_matrices_6x6=outputs_ts_stiffnesses,
@@ -469,6 +508,7 @@ def main():
             #     if timestep_idx % pipeline_para["save_visual_every_N_frame"] == 0:
             #         env.add_visual_observation(time_s)
 
+            # checks if need to sleep to wait for the execution to finish for this horizon
             time_s = env.current_hardware_time_s
             sleep_duration_s = horizon_initial_time_s + execution_duration_s - time_s
 

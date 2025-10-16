@@ -45,20 +45,29 @@ class ManipServerEnv:
         compliant_dimensionality: int,
     ) -> None:
         # manipulation server
+        # pybind links to the C++ code of the manipulation server and allows using its functions in C++
         server = ms.ManipServer()
         if not server.initialize(hardware_config_path):
             raise RuntimeError("Failed to initialize hardware server.")
+        # set to maintain position mode (manipServer.cpp)
         server.set_high_level_maintain_position()
 
+        # image transform
         self.image_transform = get_image_transform(
             input_res=input_res, output_res=camera_res_hw, bgr_to_rgb=False
         )
 
+        # check if bimanual
         if server.is_bimanual():
             id_list = [0, 1]
         else:
             id_list = [0]
 
+        # set force control parameters
+        # Tr: transformation matrix from force sensor frame to end-effector frame
+        # n_af: number of active force control dimensions
+        # default_stiffness: default stiffness matrix for force control
+        # compliant_dimensionality: number of compliant dimensions (1 to 6)
         Tr = np.eye(6)
         n_af = compliant_dimensionality
         default_stiffness = [5000, 5000, 5000, 100, 100, 100]
@@ -81,6 +90,8 @@ class ManipServerEnv:
             )
             # initialize rgb buffers
             # (c h) (n w)->n h w c
+            # PIPELINE: Hardware → Raw Buffer → Processing Buffer → Application Buffer → Model
+            #                      (packed 2D)       (raw 4D)        (processed 4D)
             rgb_row_combined_buffer.append(
                 np.zeros(
                     (input_res[0] * 3, input_res[1] * query_sizes["rgb"]),
@@ -147,11 +158,13 @@ class ManipServerEnv:
         if not self.server.is_ready():
             return False
 
+        # schedule virtual target to execute in the robot
         for id in self.id_list:
             self.server.schedule_waypoints(
                 pose7_cmd[id * 7 : (id + 1) * 7, :], timestamps, id
             )
 
+        # schedule stiffness to execute in the robot
         if stiffness_matrices_6x6 is not None:
             if len(self.id_list) == 1:
                 assert stiffness_matrices_6x6.shape[0] == 6
@@ -201,6 +214,7 @@ class ManipServerEnv:
         #  process data
         for id in self.id_list:
             # This RGB processing part takes about 60ms
+            # 4D to final image
             self.rgb_buffer[id][:] = rearrange(
                 self.rgb_row_combined_buffer[id],
                 "(c h) (n w)->n h w c",

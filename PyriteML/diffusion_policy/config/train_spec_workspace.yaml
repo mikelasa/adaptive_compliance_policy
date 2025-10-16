@@ -204,10 +204,13 @@ multi_run:
   wandb_name_base: ${now:%Y.%m.%d-%H.%M.%S}_${task_name}_${name}
 
 hydra:
+  # change the name of the directory from terminal  
   job:
     override_dirname: ${name}
+  # setea el directorio de salida
   run:
     dir: ${output_dir}/${now:%Y.%m.%d}_${now:%H.%M.%S}_${task_name}_${name}
+  # setea el directorio de salida para diferentes experimentos  
   sweep:
     dir: ${output_dir}/${now:%Y.%m.%d}_${now:%H.%M.%S}_${task_name}_${name}
     subdir: ${hydra.job.num}
