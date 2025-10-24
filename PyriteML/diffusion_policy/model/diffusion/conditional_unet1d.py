@@ -81,6 +81,7 @@ class ConditionalUnet1D(nn.Module):
         all_dims = [input_dim] + list(down_dims)
         start_dim = down_dims[0]
 
+        # for timestep embedding
         dsed = diffusion_step_embed_dim
         diffusion_step_encoder = nn.Sequential(
             SinusoidalPosEmb(dsed),
@@ -88,12 +89,15 @@ class ConditionalUnet1D(nn.Module):
             nn.Mish(),
             nn.Linear(dsed * 4, dsed),
         )
+        # if global conditioning, concat its embedding
         cond_dim = dsed
         if global_cond_dim is not None:
             cond_dim += global_cond_dim
 
+        # create pairs for downsampling and upsampling layer dimensions
         in_out = list(zip(all_dims[:-1], all_dims[1:]))
 
+        # if local conditioning, create encoder with FILM conditioning 
         local_cond_encoder = None
         if local_cond_dim is not None:
             _, dim_out = in_out[0]
@@ -111,6 +115,7 @@ class ConditionalUnet1D(nn.Module):
                     cond_predict_scale=cond_predict_scale)
             ])
 
+        # bottleneck modules
         mid_dim = all_dims[-1]
         self.mid_modules = nn.ModuleList([
             ConditionalResidualBlock1D(
@@ -125,6 +130,7 @@ class ConditionalUnet1D(nn.Module):
             ),
         ])
 
+        # downsampling and upsampling modules
         down_modules = nn.ModuleList([])
         for ind, (dim_in, dim_out) in enumerate(in_out):
             is_last = ind >= (len(in_out) - 1)
@@ -154,7 +160,8 @@ class ConditionalUnet1D(nn.Module):
                     cond_predict_scale=cond_predict_scale),
                 Upsample1d(dim_in) if not is_last else nn.Identity()
             ]))
-        
+
+        # final convolution to produce output
         final_conv = nn.Sequential(
             Conv1dBlock(start_dim, start_dim, kernel_size=kernel_size),
             nn.Conv1d(start_dim, input_dim, 1),
@@ -195,6 +202,7 @@ class ConditionalUnet1D(nn.Module):
 
         global_feature = self.diffusion_step_encoder(timesteps)
 
+        # concat global conditioning
         if global_cond is not None:
             global_feature = torch.cat([
                 global_feature, global_cond

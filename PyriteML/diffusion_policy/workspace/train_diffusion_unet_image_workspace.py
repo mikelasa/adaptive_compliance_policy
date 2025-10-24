@@ -37,10 +37,12 @@ from diffusion_policy.model.diffusion.ema_model import EMAModel
 from diffusion_policy.model.common.lr_scheduler import get_scheduler
 from accelerate import Accelerator
 
+# allows evaluating expressions in OmegaConf configs
 OmegaConf.register_new_resolver("eval", eval, replace=True)
 
 
 class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
+    # these keys will be explicitly saved in checkpoints, allows restarting training from exact point
     include_keys = ["global_step", "epoch"]
     exclude_keys = tuple()
 
@@ -53,14 +55,17 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
         np.random.seed(seed)
         random.seed(seed)
 
-        # configure model
+        # configure model from config
         self.model: DiffusionUnetTimmMod1Policy = hydra.utils.instantiate(cfg.policy)
 
+        # configure ema model
         self.ema_model: DiffusionUnetTimmMod1Policy = None
         if cfg.training.use_ema:
             self.ema_model = copy.deepcopy(self.model)
+
         # configure training state
         obs_encorder_lr = cfg.optimizer.lr
+        # 10% LR for pretrained vision encoder, as it is already pretrained
         if cfg.policy.obs_encoder["reduce_pretrained_lr"]:
             obs_encorder_lr *= 0.1
             print("==> reduce pretrained obs_encorder's lr")

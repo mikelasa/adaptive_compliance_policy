@@ -173,6 +173,7 @@ class DiffusionUnetTimmMod1Policy(BaseImagePolicy):
             device=self.device,
             dtype=self.dtype,
         )
+        #condition mask, for inpainting fixed action if needed
         cond_mask = torch.zeros_like(cond_data, dtype=torch.bool)
 
         # run sampling

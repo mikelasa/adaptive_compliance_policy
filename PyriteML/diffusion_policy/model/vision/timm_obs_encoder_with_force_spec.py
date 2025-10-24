@@ -69,6 +69,8 @@ class AttentionPool2d(nn.Module):
         return x.squeeze(0)
 
 
+# filepath: /home/robotlab/ACP/adaptive_compliance_policy/PyriteML/diffusion_policy/model/vision/timm_obs_encoder_with_force_spec.py
+
 class TimmObsEncoderWithForceSpec(ModuleAttrMixin):
     def __init__(
         self,
@@ -77,18 +79,15 @@ class TimmObsEncoderWithForceSpec(ModuleAttrMixin):
         reduce_pretrained_lr: bool,
         vision_encoder_cfg: dict,
         force_encoder_cfg: dict,
-        # replace BatchNorm with GroupNorm
-        # use single rgb model for all rgb inputs
-        # renormalize rgb input with imagenet normalization
-        # assuming input in [0,1]
         position_encoding: str = "learnable",
     ):
         """
-        Assumes rgb input: B,T,C,H,W
-        Assumes low_dim input: B,T,D
+        Multi-modal observation encoder for vision, force, and low-dim inputs.
+        Builds encoders, sets up feature aggregation and fusion modules.
         """
         super().__init__()
 
+        # Lists and maps for organizing observation keys and their encoders
         rgb_keys = list()
         low_dim_keys = list()
         wrench_keys = list()
@@ -98,6 +97,7 @@ class TimmObsEncoderWithForceSpec(ModuleAttrMixin):
 
         model_list = []
         feature_dim_list = []
+        # Build vision and force encoders based on config
         for cfg in [vision_encoder_cfg, force_encoder_cfg]:
             if cfg.model_name == "causalconv":
                 model = ForceEncoder(cfg.feature_dim)
@@ -128,9 +128,8 @@ class TimmObsEncoderWithForceSpec(ModuleAttrMixin):
                 for param in model.parameters():
                     param.requires_grad = False
 
+            # Set feature dimension based on architecture and downsample ratio
             if cfg.model_name.startswith("resnet"):
-                # the last layer is nn.Identity() because num_classes is 0
-                # second last layer is AdaptivePool2d, which is also identity because global_pool is empty
                 if cfg.downsample_ratio == 32:
                     modules = list(model.children())[:-2]
                     model = torch.nn.Sequential(*modules)
@@ -148,8 +147,6 @@ class TimmObsEncoderWithForceSpec(ModuleAttrMixin):
                         f"Unsupported downsample_ratio: {cfg.downsample_ratio}"
                     )
             elif cfg.model_name.startswith("convnext"):
-                # the last layer is nn.Identity() because num_classes is 0
-                # second last layer is AdaptivePool2d, which is also identity because global_pool is empty
                 if cfg.downsample_ratio == 32:
                     modules = list(model.children())[:-2]
                     model = torch.nn.Sequential(*modules)
@@ -164,6 +161,7 @@ class TimmObsEncoderWithForceSpec(ModuleAttrMixin):
                 feature_dim = 768
             feature_dim_list.append(feature_dim)
 
+            # Optionally replace BatchNorm with GroupNorm for small batch training
             if cfg.use_group_norm and not cfg.pretrained:
                 model = replace_submodules(
                     root_module=model,
@@ -179,8 +177,11 @@ class TimmObsEncoderWithForceSpec(ModuleAttrMixin):
                 )
             model_list.append(model)
 
+        # Assign encoders and feature dimensions
         vision_encoder, force_encoder = model_list
         self.v_feature_dim, self.f_feature_dim = feature_dim_list
+
+        # Wrap force encoder for spectrogram and normalization handling
         if force_encoder_cfg.model_name.startswith("resnet"):
             force_encoder = ForceSpecEncoder(force_encoder, force_encoder_cfg.norm_spec)
         if force_encoder_cfg.model_name.startswith("vit"):
@@ -188,6 +189,7 @@ class TimmObsEncoderWithForceSpec(ModuleAttrMixin):
                 force_encoder, force_encoder_cfg.norm_spec
             )
 
+        # Determine image shape from observation metadata
         image_shape = None
         obs_shape_meta = shape_meta["obs"]
         for key, attr in obs_shape_meta.items():
@@ -196,6 +198,7 @@ class TimmObsEncoderWithForceSpec(ModuleAttrMixin):
             if type == "rgb":
                 assert image_shape is None or image_shape == shape[1:]
                 image_shape = shape[1:]
+        # Build vision transforms from config
         if vision_encoder_cfg.transforms is not None and not isinstance(
             vision_encoder_cfg.transforms[0], torch.nn.Module
         ):
@@ -211,13 +214,13 @@ class TimmObsEncoderWithForceSpec(ModuleAttrMixin):
             else torch.nn.Sequential(*vision_encoder_cfg.transforms)
         )
 
+        # Map each observation key to its encoder and transform
         for key, attr in obs_shape_meta.items():
             shape = tuple(attr["shape"])
             type = attr.get("type", "low_dim")
             key_shape_map[key] = shape
             if type == "rgb":
                 rgb_keys.append(key)
-
                 vision_encoder = (
                     vision_encoder
                     if vision_encoder_cfg.share_rgb_model
@@ -227,9 +230,7 @@ class TimmObsEncoderWithForceSpec(ModuleAttrMixin):
                 key_transform_map[key] = vision_transform
             elif type == "low_dim":
                 if "wrench" in key:
-                    # print("key_model_map adding wrench key:", key)
                     wrench_keys.append(key)
-
                     force_encoder = (
                         force_encoder
                         if force_encoder_cfg.share_force_model
@@ -249,6 +250,7 @@ class TimmObsEncoderWithForceSpec(ModuleAttrMixin):
         print("rgb keys:         ", rgb_keys)
         print("low_dim_keys keys:", low_dim_keys)
 
+        # Store configs and mappings for use in forward pass
         self.vision_encoder_cfg = vision_encoder_cfg
         self.force_encoder_cfg = force_encoder_cfg
         self.shape_meta = shape_meta
@@ -265,10 +267,9 @@ class TimmObsEncoderWithForceSpec(ModuleAttrMixin):
             x // vision_encoder_cfg.downsample_ratio for x in image_shape
         ]
 
+        # Configure feature aggregation for vision encoder
         if vision_encoder_cfg.model_name.startswith("vit"):
-            # assert self.feature_aggregation is None # vit uses the CLS token
             if vision_encoder_cfg.feature_aggregation == "all_tokens":
-                # Use all tokens from ViT
                 pass
             elif vision_encoder_cfg.feature_aggregation is not None:
                 logger.warn(
@@ -276,9 +277,9 @@ class TimmObsEncoderWithForceSpec(ModuleAttrMixin):
                 )
                 vision_encoder_cfg.feature_aggregation = None
 
+        # Configure feature aggregation for force encoder
         if force_encoder_cfg.model_name.startswith("vit"):
             if force_encoder_cfg.feature_aggregation == "all_tokens":
-                # Use all tokens from ViT
                 pass
             elif force_encoder_cfg.feature_aggregation is not None:
                 logger.warn(
@@ -286,6 +287,7 @@ class TimmObsEncoderWithForceSpec(ModuleAttrMixin):
                 )
                 force_encoder_cfg.feature_aggregation = None
 
+        # Setup aggregation modules for non-ViT models
         if vision_encoder_cfg.feature_aggregation == "soft_attention":
             self.attention = nn.Sequential(
                 nn.Linear(feature_dim, 1, bias=False), nn.Softmax(dim=1)
@@ -326,6 +328,7 @@ class TimmObsEncoderWithForceSpec(ModuleAttrMixin):
             "number of parameters: %e", sum(p.numel() for p in self.parameters())
         )
 
+        # Setup fusion module for combining modalities
         if fuse_mode == "mlp":
             self.mlp = nn.Sequential(
                 nn.Linear(self.v_feature_dim * 3, 1024), nn.ReLU(), nn.Linear(1024, 512)
@@ -357,11 +360,12 @@ class TimmObsEncoderWithForceSpec(ModuleAttrMixin):
                 )
 
     def aggregate_feature(self, model_name, agg_mode, feature):
+        # Aggregates spatial features into a single vector per input
         if model_name.startswith("vit"):
             assert agg_mode is None  # vit uses the CLS token
             return feature[:, 0, :]
 
-        # resnet
+        # For ResNet and other CNNs, aggregate spatial features
         assert len(feature.shape) == 4
         if agg_mode == "attention_pool_2d":
             return self.attention_pool_2d(feature)
@@ -394,13 +398,16 @@ class TimmObsEncoderWithForceSpec(ModuleAttrMixin):
             return feature
 
     def forward(self, obs_dict):
-        """Assume each image key is (B, T, C, H, W)"""
+        """
+        Forward pass: encode each modality, aggregate features, fuse modalities.
+        Returns fused feature vector for policy input.
+        """
         features = list()
         modality_features = list()
         low_dim_features = list()
         batch_size = next(iter(obs_dict.values())).shape[0]
 
-        # process rgb input
+        # Process RGB inputs
         for key in self.rgb_keys:
             img = obs_dict[key]
             B, T = img.shape[:2]
@@ -418,6 +425,7 @@ class TimmObsEncoderWithForceSpec(ModuleAttrMixin):
             features.append(feature.reshape(B, -1))
             modality_features.append(feature.reshape(B, T, -1))
 
+        # Process force/wrench inputs
         for key in self.wrench_keys:
             data = obs_dict[key]
             B, T = data.shape[:2]
@@ -436,17 +444,16 @@ class TimmObsEncoderWithForceSpec(ModuleAttrMixin):
             features.append(feature.reshape(B, -1))
             modality_features.append(feature.unsqueeze(1))
 
-        # process lowdim input
+        # Process low-dimensional inputs
         for key in self.low_dim_keys:
             data = obs_dict[key]
             B, T = data.shape[:2]
             assert B == batch_size
             assert data.shape[2:] == self.key_shape_map[key]
-            # directly concatenate actions
             features.append(data.reshape(B, -1))
             low_dim_features.append(data.reshape(B, -1))
 
-        # concatenate all features
+        # Fuse all features according to selected mode
         if self.fuse_mode == "concat":
             result = torch.cat(features, dim=-1)
         elif self.fuse_mode == "mlp":
@@ -469,6 +476,9 @@ class TimmObsEncoderWithForceSpec(ModuleAttrMixin):
 
     @torch.no_grad()
     def output_shape(self):
+        """
+        Utility to compute output feature shape for a dummy input.
+        """
         example_obs_dict = dict()
         obs_shape_meta = self.shape_meta["obs"]
         sample_obs_shape_meta = self.shape_meta["sample"]["obs"]["sparse"]
@@ -488,13 +498,3 @@ class TimmObsEncoderWithForceSpec(ModuleAttrMixin):
         assert example_output.shape[0] == 1
 
         return example_output.shape
-
-
-if __name__ == "__main__":
-    timm_obs_encoder_with_force = TimmObsEncoderWithForceSpec(
-        shape_meta=None,
-        model_name="resnet18.a1_in1k",
-        pretrained=False,
-        global_pool="",
-        transforms=None,
-    )

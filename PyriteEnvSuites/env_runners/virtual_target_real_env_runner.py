@@ -111,7 +111,8 @@ def main():
         3, # rgb channels
     )
 
-    # compute query sizes based on receeding horizon.
+    # create query sizes based on observation shape meta data (horizon and downsample steps)
+    # determine how many historical data points to query from the env
     rgb_query_size = (
         shape_meta["sample"]["obs"]["sparse"]["rgb_0"]["horizon"] - 1
     ) * shape_meta["sample"]["obs"]["sparse"]["rgb_0"]["down_sample_steps"] + 1
@@ -129,7 +130,9 @@ def main():
         "wrench": wrench_query_size,
     }
 
-    # create the env (for wiping only?)
+    # create the env
+    # Manip server makes the communication with the real hardware posible through manip server
+    # and pybind11
     env = ManipServerEnv(
         camera_res_hw=(image_height, image_width),
         hardware_config_path=pipeline_para["hardware_config_path"],
