@@ -5,10 +5,6 @@ channels:
   - conda-forge
   - defaults
 dependencies:
-  - pytorch
-  - torchvision
-  - torchaudio
-  - pytorch-cuda=12.1
   - huggingface_hub
   - wandb
   - timm
@@ -28,13 +24,12 @@ dependencies:
   - pyyaml
   - scipy
   - tqdm
-  - zarr
+  - zarr<3
   - spatialmath-python
-  - numcodecs
+  - numcodecs<0.13
   - scikit-video
   - scikit-fda
   # trick to avoid cpu affinity issue described in https://github.com/pytorch/pytorch/issues/99625
-  - llvm-openmp=14
   - eigen=3.4
   - cmake
   - pybind11

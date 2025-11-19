@@ -1,4 +1,4 @@
-name: flip_up_new
+name: Wipe_single_arm
 
 # rgb vs. low_dim: raw data are either rgb images or low_dim vectors. frames are aligned within each type.
 # obs vs. action: obs data are used as policy input; action are used as labels for policy output.
@@ -11,8 +11,8 @@ sparse_obs_rgb_horizon: 2
 sparse_obs_low_dim_down_sample_steps: 5
 sparse_obs_low_dim_horizon: 3
 
-sparse_obs_wrench_down_sample_steps: 4
-sparse_obs_wrench_horizon: 32
+sparse_obs_wrench_down_sample_steps: 1
+sparse_obs_wrench_horizon: 7000
 
 sparse_action_down_sample_steps: 50
 sparse_action_horizon: 16
@@ -99,8 +99,8 @@ shape_meta: &shape_meta
         horizon: ${task.sparse_action_horizon}
         down_sample_steps: ${task.sparse_action_down_sample_steps} # int
 
-task_name: &task_name flip_up
-dataset_path: ${oc.env:PYRITE_DATASET_FOLDERS}/flipup_raw_wrist_camera_v0
+task_name: &task_name wipe_single_arm
+dataset_path: ${oc.env:PYRITE_DATASET_FOLDERS}/wipe_single_arm
 
 env_runner: # used in workspace for computing metrics
   _target_: diffusion_policy.env_runner.real_pusht_image_runner.RealPushTImageRunner
@@ -115,4 +115,4 @@ dataset:
   temporally_independent_normalization: False
   seed: 42
   val_ratio: 0.05
-  normalize_wrench: True
+  normalize_wrench: False

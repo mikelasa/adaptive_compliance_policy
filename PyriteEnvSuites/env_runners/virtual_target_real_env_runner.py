@@ -42,20 +42,20 @@ control_log_folder_path = os.environ.get("PYRITE_CONTROL_LOG_FOLDERS")
 
 def main():
     control_para = {
-        "raw_time_step_s": 0.002,  # dt of raw data collection. Used to compute time step from time_s such that the downsampling according to shape_meta works.
+        "raw_time_step_s": 0.001,  # dt of raw data collection. Used to compute time step from time_s such that the downsampling according to shape_meta works.
         "slow_down_factor": 1.5,  # 3 for flipup, 1.5 for wiping
         "sparse_execution_horizon": 12,  # 12 for flipup, 8/24 for wiping
         "max_duration_s": 3500,
         "pausing_mode": False,
-        "device": "cuda",
+        "device": "cpu",
     }
     pipeline_para = {
         "save_low_dim_every_N_frame": 1,
         "save_visual_every_N_frame": 1,
-        "ckpt_path": "/2024.09.25_21.10.43_flip_up_new_resnet_230",
+        "ckpt_path": "/2025.10.27_13.07.28_flip_up_new_resnet_230/checkpoints/latest.ckpt",
         # "hardware_config_path": hardware_config_folder_path + "/manip_server_config_left_arm.yaml",
         "hardware_config_path": hardware_config_folder_path
-        + "/manip_server_config_bimanual.yaml",
+        + "/single_arm_data_collection_franka.yaml",
         "control_log_path": control_log_folder_path + "/temp/",
     }
     force_filtering_para = {

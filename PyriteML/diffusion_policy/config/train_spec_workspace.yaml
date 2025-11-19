@@ -2,8 +2,9 @@ defaults:
   - _self_
   # - task: vase_wiping_spec.yaml
   - task: flip_up_spec.yaml
+  #- task: wipe_single_arm_spec.yaml
 
-name: resnet_230
+name: Wipe_single_arm
 
 output_dir: ${oc.env:PYRITE_CHECKPOINT_FOLDERS}
 _target_: diffusion_policy.workspace.train_diffusion_unet_image_workspace.TrainDiffusionUnetImageWorkspace
