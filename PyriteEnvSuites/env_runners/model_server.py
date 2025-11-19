@@ -19,6 +19,7 @@ sys.path.append(os.path.join(SCRIPT_PATH, "../../"))
 from PyriteUtility.planning_control.mpc_refactorized import ModelPredictiveControllerHybrid  
 from PyriteUtility.pytorch_utils.model_io import load_policy
 from PyriteEnvSuites.utils.env_utils import pose9pose9s1_to_traj
+from omegaconf import OmegaConf
 
 checkpoint_folder_path = os.environ.get("PYRITE_CHECKPOINT_FOLDERS")
 
@@ -159,9 +160,11 @@ def update_control(req: UpdateControlRequest):
     
 # inside model_server.py
 @app.get("/shape_meta")
-def get_shape_meta() -> Dict[str, Any]:
+def get_shape_meta():
     ctrl = _ensure_controller()
-    return ctrl.shape_meta
+    # Convert OmegaConf DictConfig/ListConfig to plain dict/list
+    plain = OmegaConf.to_container(ctrl.shape_meta, resolve=True)
+    return plain
 
 
 

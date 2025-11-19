@@ -112,5 +112,11 @@ class MPCClient:
         return result
     
     def get_shape_meta(self) -> Dict[str, Any]:
-        return self._post("/shape_meta", {})
+        """
+        Fetch shape_meta from the model server.
+        """
+        url = f"{self.base_url}/shape_meta"
+        resp = self.session.get(url, timeout=self.timeout)
+        resp.raise_for_status()
+        return resp.json()
 
