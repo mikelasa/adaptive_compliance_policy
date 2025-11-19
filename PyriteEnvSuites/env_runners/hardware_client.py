@@ -110,3 +110,7 @@ class MPCClient:
         payload = {"time_now": time_now}
         result = self._post("/compute_sparse_control", payload)
         return result
+    
+    def get_shape_meta(self) -> Dict[str, Any]:
+        return self._post("/shape_meta", {})
+

@@ -16,17 +16,15 @@ import spatialmath as sm
 
 
 from PyriteEnvSuites.envs.task.manip_server_env import ManipServerEnv
-from PyriteEnvSuites.utils.env_utils import ts_to_js_traj, pose9pose9s1_to_traj
 
 from PyriteConfig.tasks.common.common_type_conversions import raw_to_obs
 from PyriteUtility.spatial_math import spatial_utilities as su
-from PyriteUtility.planning_control.mpc import ModelPredictiveControllerHybrid
 from PyriteUtility.planning_control.trajectory import LinearTransformationInterpolator
-from PyriteUtility.pytorch_utils.model_io import load_policy
 from PyriteUtility.plotting.matplotlib_helpers import set_axes_equal
 from PyriteUtility.umi_utils.usb_util import reset_all_elgato_devices
 from PyriteUtility.common import GracefulKiller
 from hardware_client import MPCClient
+from PyriteEnvSuites.utils.env_utils import pose9pose9s1_to_traj
 
 if "PYRITE_CHECKPOINT_FOLDERS" not in os.environ:
     raise ValueError("Please set the environment variable PYRITE_CHECKPOINT_FOLDERS")
@@ -44,7 +42,8 @@ control_log_folder_path = os.environ.get("PYRITE_CONTROL_LOG_FOLDERS")
 
 def main():
 
-    mpc_client = MPCClient(base_url="http://172.17.6.132:8000")
+    MPC_SERVER_URL = "http://192.168.1.141:8000"  # your server’s IP:port
+    mpc_client = MPCClient(MPC_SERVER_URL)
 
     control_para = {
         "raw_time_step_s": 0.001,  # dt of raw data collection. Used to compute time step from time_s such that the downsampling according to shape_meta works.
@@ -95,12 +94,7 @@ def main():
 
     reset_all_elgato_devices()
 
-    # load policy
-    print("Loading policy: ", checkpoint_folder_path + pipeline_para["ckpt_path"])
-    device = torch.device(control_para["device"])
-    policy, shape_meta = load_policy(
-        checkpoint_folder_path + pipeline_para["ckpt_path"], device
-    )
+    shape_meta = mpc_client.get_shape_meta()
 
     # image size
     (image_width, image_height) = get_real_obs_resolution(shape_meta)
@@ -193,16 +187,6 @@ def main():
         raise RuntimeError("unsupported")
 
     printOrNot(vbs_h2, "Creating MPC.")
-    # create MPC controller: combines policy with interpolation
-    controller = ModelPredictiveControllerHybrid(
-        shape_meta=shape_meta,
-        id_list=id_list,
-        policy=policy,
-        action_to_trajectory=action_to_trajectory,
-        sparse_execution_horizon=sparse_execution_horizon,
-    )
-    # sets a time offset between env time and controller time to align
-    controller.set_time_offset(env)
 
     # timestep_idx = 0
     # stiffness = None
@@ -297,9 +281,9 @@ def main():
             result = mpc_client.compute_sparse_control(time_now=env.current_hardware_time_s)
 
             #unpack result
-            action_sparse_target_mats = result["target_mats"]
-            action_sparse_vt_mats     = result["vt_mats"]
-            action_stiffnesses        = result["stiffness"]
+            action_sparse_target_mats = np.array(result["target_mats"])
+            action_sparse_vt_mats     = np.array(result["vt_mats"])
+            action_stiffnesses        = np.array(result["stiffness"])
 
             # decode stiffness matrix
             outputs_ts_nominal_targets = [np.array] * len(id_list)

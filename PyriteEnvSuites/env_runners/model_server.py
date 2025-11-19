@@ -12,8 +12,11 @@ from pydantic import BaseModel
 
 sys.path.append(os.path.join(sys.path[0], ".."))
 
+SCRIPT_PATH = os.path.abspath(os.path.dirname(__file__))
+sys.path.append(os.path.join(SCRIPT_PATH, "../../"))
+
 # Import your refactored controller class
-from PyriteUtility.planning_control.mpc import ModelPredictiveControllerHybrid  
+from PyriteUtility.planning_control.mpc_refactorized import ModelPredictiveControllerHybrid  
 from PyriteUtility.pytorch_utils.model_io import load_policy
 from PyriteEnvSuites.utils.env_utils import pose9pose9s1_to_traj
 
@@ -22,7 +25,7 @@ checkpoint_folder_path = os.environ.get("PYRITE_CHECKPOINT_FOLDERS")
 policy_para = {
         "save_low_dim_every_N_frame": 1,
         "save_visual_every_N_frame": 1,
-        "ckpt_path": "/2025.10.27_13.07.28_flip_up_new_resnet_230/checkpoints/latest.ckpt",
+        "ckpt_path": "/2025.11.04_10.05.05_Wipe_single_arm_Wipe_single_arm/checkpoints/latest.ckpt",
     }
 
 # ---------------------------------------------------------------------
@@ -153,6 +156,13 @@ def update_control(req: UpdateControlRequest):
         return {"status": "new_horizon"}
     else:
         return {"target": np.asarray(target).tolist()}
+    
+# inside model_server.py
+@app.get("/shape_meta")
+def get_shape_meta() -> Dict[str, Any]:
+    ctrl = _ensure_controller()
+    return ctrl.shape_meta
+
 
 
 # ---------------------------------------------------------------------
