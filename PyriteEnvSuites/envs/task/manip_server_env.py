@@ -239,7 +239,7 @@ class ManipServerEnv:
             assert self.wrench[id].shape == (self.query_sizes["wrench"], 6)
 
         timedebug1 = time.perf_counter()
-        print(f"get obs: Time for processing data: {timedebug1 - timedebug0}")
+        #print(f"get obs: Time for processing data: {timedebug1 - timedebug0}")
 
         results = {}
         for id in self.id_list:
@@ -251,9 +251,10 @@ class ManipServerEnv:
             results[f"wrench_time_stamps_{id}"] = self.wrench_timestamp_s[id]
 
             # debug
-            print(f"self.wrench_filtered[{id}]: ", self.wrench_filtered[id][-1])
+            #print(f"self.wrench_filtered[{id}]: ", self.wrench_filtered[id][-1])
 
         # check timing
+        """
         for id in self.id_list:
             dt_rgb = self.current_hardware_time_s - results[f"rgb_time_stamps_{id}"][-1]
             dt_ts_pose = (
@@ -264,5 +265,5 @@ class ManipServerEnv:
             )
             print(
                 f"[get obs] obs lagging for robot {id}: dt_rgb: {dt_rgb}, dt_ts_pose: {dt_ts_pose}, dt_wrench: {dt_wrench}"
-            )
+            )"""
         return results

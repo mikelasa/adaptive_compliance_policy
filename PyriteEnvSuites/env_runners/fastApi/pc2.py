@@ -42,21 +42,22 @@ control_log_folder_path = os.environ.get("PYRITE_CONTROL_LOG_FOLDERS")
 
 def main():
 
-    MPC_SERVER_URL = "http://192.168.1.141:8000"  # your server’s IP:port
+    MPC_SERVER_URL = "http://172.17.6.100:8000"  # your server’s IP:port
     mpc_client = MPCClient(MPC_SERVER_URL)
 
     control_para = {
         "raw_time_step_s": 0.001,  # dt of raw data collection. Used to compute time step from time_s such that the downsampling according to shape_meta works.
-        "slow_down_factor": 1.5,  # 3 for flipup, 1.5 for wiping
+        "slow_down_factor": 100,  # 3 for flipup, 1.5 for wiping
         "sparse_execution_horizon": 12,  # 12 for flipup, 8/24 for wiping
         "max_duration_s": 3500,
         "pausing_mode": False,
-        "device": "cpu",
+        "device": "cuda",
     }
     pipeline_para = {
         "save_low_dim_every_N_frame": 1,
         "save_visual_every_N_frame": 1,
-        "ckpt_path": "/2025.10.27_13.07.28_flip_up_new_resnet_230/checkpoints/latest.ckpt",
+        #"ckpt_path": "/2025.10.27_13.07.28_flip_up_new_resnet_230/checkpoints/latest.ckpt",
+        "ckpt_path": "/2025.11.04_11.01.11_flip_up_new_flip_up_new/checkpoints/latest.ckpt",
         # "hardware_config_path": hardware_config_folder_path + "/manip_server_config_left_arm.yaml",
         "hardware_config_path": hardware_config_folder_path
         + "/single_arm_data_collection_franka.yaml",
@@ -275,15 +276,23 @@ def main():
             assert action_type == "pose9pose9s1"
 
             # set observation applies downsampling according to shape_meta
+            start_time = time.time()
             mpc_client.set_observation(obs_task["obs"])
+            end_time = time.time()
+            print(f"Time taken to set observation: {end_time - start_time} seconds")
 
-            # inference: add batch size 
+            # inference: add batch size
+            start_time = time.time()
             result = mpc_client.compute_sparse_control(time_now=env.current_hardware_time_s)
+            end_time = time.time()
+            print(f"Time taken to compute sparse control: {end_time - start_time} seconds")
 
             #unpack result
             action_sparse_target_mats = np.array(result["target_mats"])
             action_sparse_vt_mats     = np.array(result["vt_mats"])
             action_stiffnesses        = np.array(result["stiffness"])
+            #print("action_sparse_target_mats :", action_sparse_target_mats)
+            #print("action_stiffnesses :", action_stiffnesses)
 
             # decode stiffness matrix
             outputs_ts_nominal_targets = [np.array] * len(id_list)

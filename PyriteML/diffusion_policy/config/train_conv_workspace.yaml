@@ -1,9 +1,10 @@
 defaults:
   - _self_
   # - task: vase_wiping_conv.yaml
-  - task: flip_up_conv.yaml
+  # - task: flip_up_conv.yaml
+  - task: draw_single_arm_conv.yaml
 
-name: conv_230
+name: conv_draw
 output_dir: ${oc.env:PYRITE_CHECKPOINT_FOLDERS}
 _target_: diffusion_policy.workspace.train_diffusion_unet_image_workspace.TrainDiffusionUnetImageWorkspace
 

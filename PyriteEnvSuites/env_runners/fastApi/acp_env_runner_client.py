@@ -1,6 +1,7 @@
 import sys
 import os
 from typing import Dict, Callable, Tuple, List
+from unittest import result
 
 SCRIPT_PATH = os.path.abspath(os.path.dirname(__file__))
 sys.path.append(os.path.join(SCRIPT_PATH, "../../"))
@@ -15,16 +16,15 @@ import spatialmath as sm
 
 
 from PyriteEnvSuites.envs.task.manip_server_env import ManipServerEnv
-from PyriteEnvSuites.utils.env_utils import ts_to_js_traj, pose9pose9s1_to_traj
 
 from PyriteConfig.tasks.common.common_type_conversions import raw_to_obs
 from PyriteUtility.spatial_math import spatial_utilities as su
-from PyriteUtility.planning_control.mpc import ModelPredictiveControllerHybrid
 from PyriteUtility.planning_control.trajectory import LinearTransformationInterpolator
-from PyriteUtility.pytorch_utils.model_io import load_policy
 from PyriteUtility.plotting.matplotlib_helpers import set_axes_equal
 from PyriteUtility.umi_utils.usb_util import reset_all_elgato_devices
 from PyriteUtility.common import GracefulKiller
+from hardware_client import MPCClient
+from PyriteEnvSuites.utils.env_utils import pose9pose9s1_to_traj
 
 if "PYRITE_CHECKPOINT_FOLDERS" not in os.environ:
     raise ValueError("Please set the environment variable PYRITE_CHECKPOINT_FOLDERS")
@@ -41,18 +41,23 @@ control_log_folder_path = os.environ.get("PYRITE_CONTROL_LOG_FOLDERS")
 
 
 def main():
+
+    MPC_SERVER_URL = "http://172.17.6.120:8000"  # your server’s IP:port
+    mpc_client = MPCClient(MPC_SERVER_URL)
+
     control_para = {
         "raw_time_step_s": 0.001,  # dt of raw data collection. Used to compute time step from time_s such that the downsampling according to shape_meta works.
-        "slow_down_factor": 500,  # 3 for flipup, 1.5 for wiping
-        "sparse_execution_horizon": 12,  # 12 for flipup, 8/24 for wiping
+        "slow_down_factor": 3,  # 3 for flipup, 1.5 for wiping
+        "sparse_execution_horizon": 12,  # INCREASED from 12 to 24 for Franka (12 for flipup with UR, 24 for Franka due to stricter timing)
         "max_duration_s": 3500,
-        "pausing_mode": True,
+        "pausing_mode": False,
         "device": "cuda",
     }
     pipeline_para = {
         "save_low_dim_every_N_frame": 1,
         "save_visual_every_N_frame": 1,
-        "ckpt_path": "/2025.11.04_10.05.05_Wipe_single_arm_Wipe_single_arm/checkpoints/latest.ckpt",
+        "ckpt_path": "/2025.10.27_13.07.28_flip_up_new_resnet_230/checkpoints/latest.ckpt",
+        #"ckpt_path": "/2025.11.04_11.01.11_flip_up_new_flip_up_new/checkpoints/latest.ckpt",
         # "hardware_config_path": hardware_config_folder_path + "/manip_server_config_left_arm.yaml",
         "hardware_config_path": hardware_config_folder_path
         + "/single_arm_data_collection_franka.yaml",
@@ -90,12 +95,7 @@ def main():
 
     reset_all_elgato_devices()
 
-    # load policy
-    print("Loading policy: ", checkpoint_folder_path + pipeline_para["ckpt_path"])
-    device = torch.device(control_para["device"])
-    policy, shape_meta = load_policy(
-        checkpoint_folder_path + pipeline_para["ckpt_path"], device
-    )
+    shape_meta = mpc_client.get_shape_meta()
 
     # image size
     (image_width, image_height) = get_real_obs_resolution(shape_meta)
@@ -188,16 +188,6 @@ def main():
         raise RuntimeError("unsupported")
 
     printOrNot(vbs_h2, "Creating MPC.")
-    # create MPC controller: combines policy with interpolation
-    controller = ModelPredictiveControllerHybrid(
-        shape_meta=shape_meta,
-        id_list=id_list,
-        policy=policy,
-        action_to_trajectory=action_to_trajectory,
-        sparse_execution_horizon=sparse_execution_horizon,
-    )
-    # sets a time offset between env time and controller time to align
-    controller.set_time_offset(env)
 
     # timestep_idx = 0
     # stiffness = None
@@ -234,6 +224,7 @@ def main():
     print("test plotting RGB. Press q to continue.")
 
     # test camera and plot rgb
+    
     while True:
         # gets observation from env
         obs_raw = env.get_observation_from_buffer()
@@ -248,11 +239,12 @@ def main():
         key = cv2.waitKey(10)
         if key == ord("q"):
             break
-
+    
     # get initial tool space poses
     ts_pose_initial = []
     for id in id_list:
         ts_pose_initial.append(obs_raw[f"ts_pose_fb_{id}"][-1])
+        
     #########################################
     # main loop starts
     #########################################
@@ -266,10 +258,14 @@ def main():
             horizon_initial_time_s = env.current_hardware_time_s
             printOrNot(vbs_h1, "Starting new horizon at ", horizon_initial_time_s)
 
-            # get observation from env
-            # takes rgb images, ts poses, wrenches anda processes them into a dictionary
+            # get observation from env - MINIMAL PROCESSING ONLY
+            # Get raw data quickly without processing
+            timedebug_start = time.perf_counter()
             obs_raw = env.get_observation_from_buffer()
+            timedebug_obs = time.perf_counter()
+            print(f"⏱️ get_observation_from_buffer: {(timedebug_obs - timedebug_start)*1000:.1f} ms")
 
+            
             # plot the rgb image
             if len(id_list) == 1:
                 rgb = obs_raw["rgb_0"][-1]
@@ -278,28 +274,40 @@ def main():
             bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
             cv2.imshow("image", bgr)
             cv2.waitKey(10)
+            
 
             # save low dim obs named as raw in new dict called obs_task
             # function change format and names of obs
             obs_task = dict()
+            timedebug_convert_start = time.perf_counter()
             raw_to_obs(obs_raw, obs_task, shape_meta)
+            timedebug_convert = time.perf_counter()
+            print(f"⏱️ raw_to_obs: {(timedebug_convert - timedebug_convert_start)*1000:.1f} ms")
 
             assert action_type == "pose9pose9s1"
 
             # set observation applies downsampling according to shape_meta
-            controller.set_observation(obs_task["obs"])
+            start_time = time.time()
+            mpc_client.set_observation(obs_task["obs"])
+            end_time = time.time()
+            print(f"⏱️ set_observation: {(end_time - start_time)*1000:.1f} ms")
 
-            # inference: add batch size 
-            (action_sparse_target_mats, action_sparse_vt_mats, 
-             action_stiffnesses, ) = controller.compute_sparse_control(device)
+            # inference: add batch size
+            start_time = time.time()
+            result = mpc_client.compute_sparse_control(time_now=env.current_hardware_time_s)
+            end_time = time.time()
+            print(f"⏱️ compute_sparse_control: {(end_time - start_time)*1000:.1f} ms")
 
-            # for id in id_list:
-            #     print(f"Stiffness {id}: ", action_stiffnesses[id])
+            #unpack result
+            action_sparse_target_mats = np.array(result["target_mats"])
+            action_sparse_vt_mats     = np.array(result["vt_mats"])
+            action_stiffnesses        = np.array(result["stiffness"])
 
             # decode stiffness matrix
             outputs_ts_nominal_targets = [np.array] * len(id_list)
             outputs_ts_targets = [np.array] * len(id_list)
             outputs_ts_stiffnesses = [np.array] * len(id_list)
+
             for id in id_list:
                 # get tool to world transform
                 SE3_TW = su.SE3_inv(su.pose7_to_SE3(obs_raw[f"ts_pose_fb_{id}"][-1]))
