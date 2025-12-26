@@ -441,6 +441,9 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
 
         accelerator.end_training()
 
+        #for optimizatin
+        return train_loss
+
 
 @hydra.main(
     version_base=None,

@@ -3,8 +3,9 @@ defaults:
   # - task: vase_wiping_conv.yaml
   # - task: flip_up_conv.yaml
   - task: draw_single_arm_conv.yaml
+  - override hydra/sweeper: optuna
 
-name: conv_draw
+name: hpo-search
 output_dir: ${oc.env:PYRITE_CHECKPOINT_FOLDERS}
 _target_: diffusion_policy.workspace.train_diffusion_unet_image_workspace.TrainDiffusionUnetImageWorkspace
 
@@ -151,7 +152,7 @@ training:
   # optimization
   lr_scheduler: cosine
   lr_warmup_steps: 2000
-  num_epochs: 300
+  num_epochs: 1000
   
   log_gradient_norm: False
 
@@ -174,7 +175,7 @@ training:
 
 
 logging:
-  project: hierarchical-policy
+  project: adaptative-compliance-policy-tests
   resume: False
   mode: online
   name: ${now:%Y.%m.%d-%H.%M.%S}_${task_name}_${name}
@@ -196,6 +197,25 @@ multi_run:
   wandb_name_base: ${now:%Y.%m.%d-%H.%M.%S}_${task_name}_${name}
 
 hydra:
+  sweeper:
+    _target_: hydra_plugins.hydra_optuna_sweeper.optuna_sweeper.OptunaSweeper
+
+    direction: minimize
+    n_trials: 1 #number of HPO trials to test
+    n_jobs: 1 #in GPU use 1
+
+    sampler:
+      _target_: optuna.samplers.TPESampler
+      seed: 42
+
+    params:
+      optimizer.lr: interval(1e-5, 3e-4)
+      optimizer.weight_decay: interval(1e-8, 1e-5)
+      dataloader.batch_size: choice(64, 128)
+      val_dataloader.batch_size: choice(64, 128)
+      policy.input_pertub: interval(0.05, 0.15)
+      ema.power: interval(0.7, 0.85)
+
   job:
     override_dirname: ${name}
   run:
@@ -203,3 +223,5 @@ hydra:
   sweep:
     dir: ${output_dir}/${now:%Y.%m.%d}_${now:%H.%M.%S}_${task_name}_${name}
     subdir: ${hydra.job.num}
+
+  

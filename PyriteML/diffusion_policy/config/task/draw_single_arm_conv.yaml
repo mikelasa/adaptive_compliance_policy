@@ -1,4 +1,4 @@
-name: draw_single_arm
+name: single_arm_draw
 
 # rgb vs. low_dim: raw data are either rgb images or low_dim vectors. frames are aligned within each type.
 # obs vs. action: obs data are used as policy input; action are used as labels for policy output.
@@ -8,20 +8,20 @@ name: draw_single_arm
 sparse_obs_rgb_down_sample_steps: 10
 sparse_obs_rgb_horizon: 2
 
-sparse_obs_low_dim_down_sample_steps: 4
+sparse_obs_low_dim_down_sample_steps: 5
 sparse_obs_low_dim_horizon: 3
 
 sparse_obs_wrench_down_sample_steps: 4
 sparse_obs_wrench_horizon: 32
 
 sparse_action_down_sample_steps: 50
-sparse_action_horizon: 32
+sparse_action_horizon: 16
 
 
 shape_meta: &shape_meta
   # acceptable types: rgb, low_dim
   # fields under raw and obs must be consistent with FlipUpDataset.raw_to_obs_action()
-  id_list: [0, 1]
+  id_list: [0]
   raw: # describes what exists in data
     rgb_0:
       shape: [3, 224, 224]
@@ -41,24 +41,6 @@ shape_meta: &shape_meta
     wrench_0:
       shape: [6]
       type: low_dim
-    rgb_1:
-      shape: [3, 224, 224]
-      type: rgb
-    ts_pose_fb_1:
-      shape: [7]
-      type: low_dim
-    ts_pose_command_1:
-      shape: [7]
-      type: low_dim
-    ts_pose_virtual_target_1:
-      shape: [7]
-      type: low_dim
-    stiffness_1:
-      shape: [1]
-      type: low_dim
-    wrench_1:
-      shape: [6]
-      type: low_dim
     rgb_time_stamps_0:
       shape: [1]
       type: timestamp
@@ -66,15 +48,6 @@ shape_meta: &shape_meta
       shape: [1]
       type: timestamp
     wrench_time_stamps_0:
-      shape: [1]
-      type: timestamp
-    rgb_time_stamps_1:
-      shape: [1]
-      type: timestamp
-    robot_time_stamps_1:
-      shape: [1]
-      type: timestamp
-    wrench_time_stamps_1:
       shape: [1]
       type: timestamp
 
@@ -89,34 +62,7 @@ shape_meta: &shape_meta
       shape: [6]
       type: low_dim
       rotation_rep: rotation_6d
-    robot0_abs_eef_pos:
-      shape: [3]
-      type: low_dim
-    robot0_abs_eef_rot_axis_angle:
-      shape: [6]
-      type: low_dim
-      rotation_rep: rotation_6d
     robot0_eef_wrench:
-      shape: [6]
-      type: low_dim
-    rgb_1:
-      shape: [3, 224, 224]
-      type: rgb
-    robot1_eef_pos:
-      shape: [3]
-      type: low_dim
-    robot1_eef_rot_axis_angle:
-      shape: [6]
-      type: low_dim
-      rotation_rep: rotation_6d
-    robot1_abs_eef_pos:
-      shape: [3]
-      type: low_dim
-    robot1_abs_eef_rot_axis_angle:
-      shape: [6]
-      type: low_dim
-      rotation_rep: rotation_6d
-    robot1_eef_wrench:
       shape: [6]
       type: low_dim
     rgb_time_stamps_0:
@@ -128,17 +74,8 @@ shape_meta: &shape_meta
     wrench_time_stamps_0:
       shape: [1]
       type: timestamp
-    rgb_time_stamps_1:
-      shape: [1]
-      type: timestamp
-    robot_time_stamps_1:
-      shape: [1]
-      type: timestamp
-    wrench_time_stamps_1:
-      shape: [1]
-      type: timestamp
   action: # describes actions loaded to memory, computed from robot command
-    shape: [38] # 9 for reference pose, 9 for virtual target, 1 for stiffness
+    shape: [19] # 9 for reference pose, 9 for virtual target, 1 for stiffness
     rotation_rep: rotation_6d
   sample: # describes samples used in a batch
           # keys here must exist in obs/action above.
@@ -154,31 +91,7 @@ shape_meta: &shape_meta
         robot0_eef_rot_axis_angle: # exists in data
           horizon: ${task.sparse_obs_low_dim_horizon} # int
           down_sample_steps: ${task.sparse_obs_low_dim_down_sample_steps} # float
-        robot0_abs_eef_pos:
-          horizon: ${task.sparse_obs_low_dim_horizon} # int
-          down_sample_steps: ${task.sparse_obs_low_dim_down_sample_steps} # float
-        robot0_abs_eef_rot_axis_angle: # exists in data
-          horizon: ${task.sparse_obs_low_dim_horizon} # int
-          down_sample_steps: ${task.sparse_obs_low_dim_down_sample_steps} # float
         robot0_eef_wrench:
-          horizon: ${task.sparse_obs_wrench_horizon} # int
-          down_sample_steps: ${task.sparse_obs_wrench_down_sample_steps} # float
-        rgb_1:
-          horizon: ${task.sparse_obs_rgb_horizon} # int
-          down_sample_steps: ${task.sparse_obs_rgb_down_sample_steps} # int
-        robot1_eef_pos:
-          horizon: ${task.sparse_obs_low_dim_horizon} # int
-          down_sample_steps: ${task.sparse_obs_low_dim_down_sample_steps} # float
-        robot1_eef_rot_axis_angle: # exists in data
-          horizon: ${task.sparse_obs_low_dim_horizon} # int
-          down_sample_steps: ${task.sparse_obs_low_dim_down_sample_steps} # float
-        robot1_abs_eef_pos:
-          horizon: ${task.sparse_obs_low_dim_horizon} # int
-          down_sample_steps: ${task.sparse_obs_low_dim_down_sample_steps} # float
-        robot1_abs_eef_rot_axis_angle: # exists in data
-          horizon: ${task.sparse_obs_low_dim_horizon} # int
-          down_sample_steps: ${task.sparse_obs_low_dim_down_sample_steps} # float
-        robot1_eef_wrench:
           horizon: ${task.sparse_obs_wrench_horizon} # int
           down_sample_steps: ${task.sparse_obs_wrench_down_sample_steps} # float
     action:
@@ -186,8 +99,8 @@ shape_meta: &shape_meta
         horizon: ${task.sparse_action_horizon}
         down_sample_steps: ${task.sparse_action_down_sample_steps} # int
 
-task_name: &task_name draw_single_arm
-dataset_path: ${oc.env:PYRITE_DATASET_FOLDERS}/vase_wiping_v6.3
+task_name: &task_name flip_up
+dataset_path: ${oc.env:PYRITE_DATASET_FOLDERS}/draw_single_arm_good_wrench
 
 env_runner: # used in workspace for computing metrics
   _target_: diffusion_policy.env_runner.real_pusht_image_runner.RealPushTImageRunner
