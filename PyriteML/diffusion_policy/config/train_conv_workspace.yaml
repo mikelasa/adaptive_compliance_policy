@@ -125,14 +125,14 @@ ema:
 
 dataloader:
   batch_size: 128
-  num_workers: 32
+  num_workers: 16 #check your system
   shuffle: True
   pin_memory: True
   persistent_workers: True
 
 val_dataloader:
   batch_size: 128
-  num_workers: 32
+  num_workers: 16
   shuffle: False
   pin_memory: True
   persistent_workers: True
@@ -152,7 +152,7 @@ training:
   # optimization
   lr_scheduler: cosine
   lr_warmup_steps: 2000
-  num_epochs: 1000
+  num_epochs: 15
   
   log_gradient_norm: False
 
@@ -166,7 +166,7 @@ training:
   rollout_every: 10
   checkpoint_every: 10
   val_every: 5
-  sample_every: 5
+  sample_every: 5 #validation sampling
   # steps per epoch
   max_train_steps: null
   max_val_steps: null
@@ -175,7 +175,7 @@ training:
 
 
 logging:
-  project: adaptative-compliance-policy-tests
+  project: test-epochs
   resume: False
   mode: online
   name: ${now:%Y.%m.%d-%H.%M.%S}_${task_name}_${name}
@@ -185,7 +185,7 @@ logging:
 
 checkpoint:
   topk:
-    monitor_key: train_loss
+    monitor_key: val_sparse_naction_mse_error
     mode: min
     k: 20
     format_str: 'epoch={epoch:04d}-train_loss={train_loss:.3f}.ckpt'
@@ -201,7 +201,7 @@ hydra:
     _target_: hydra_plugins.hydra_optuna_sweeper.optuna_sweeper.OptunaSweeper
 
     direction: minimize
-    n_trials: 1 #number of HPO trials to test
+    n_trials: 2 #number of HPO trials to test
     n_jobs: 1 #in GPU use 1
 
     sampler:
@@ -209,12 +209,38 @@ hydra:
       seed: 42
 
     params:
-      optimizer.lr: interval(1e-5, 3e-4)
-      optimizer.weight_decay: interval(1e-8, 1e-5)
+      #general hyperparameters to tune
       dataloader.batch_size: choice(64, 128)
-      val_dataloader.batch_size: choice(64, 128)
-      policy.input_pertub: interval(0.05, 0.15)
+      optimizer.lr: interval(2e-4, 5e-4)
+      optimizer.weight_decay: interval(1e-8, 1e-4)
+      training.lr_warmup_steps: choice(500, 1000, 2000, 4000)
       ema.power: interval(0.7, 0.85)
+
+      # encoder hyperparameters to tune
+      policy.input_pertub: interval(0.05, 0.15)
+      # vision encoder
+      #obs_encoder.reduce_pretrained_lr: choice(True, False)
+      #training.freeze_encoder: choice(True, False)
+      #obs_encoder.vision_encoder_cfg.model_name: choice(
+      #  'resnet34.a1_in1k',
+      #  'vit_base_patch32_clip_224.openai',
+      #  'convnext_base.clip_laion2b_augreg_ft_in12k'
+      #)
+      #obs_encoder.vision_encoder_cfg.pretrained: choice(True, False)
+      #obs_encoder.vision_encoder_cfg.frozen: choice(True, False)
+      #obs_encoder.vision_encoder_cfg.transforms:
+        #- type: RandomCrop
+        #  ratio: choice(0.9, 0.95, 1.0)
+        #- _target_: torchvision.transforms.ColorJitter
+        #  brightness: choice(0.2, 0.3, 0.4)
+        #  contrast: choice(0.3, 0.4, 0.5)
+        #  saturation: choice(0.4, 0.5, 0.6)
+        #  hue: choice(0.05, 0.08, 0.1)
+      
+      # force encoder
+      #obs_encoder.force_encoder_cfg.feature_dim: choice(128, 256, 384, 512)
+
+      # diffusion hyperparameters to tune (TODO)
 
   job:
     override_dirname: ${name}

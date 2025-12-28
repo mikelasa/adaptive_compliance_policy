@@ -231,6 +231,8 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
             cfg.training.sample_every = 1
 
         args = {}
+        # Store the best validation metric
+        best_val_metric = float('inf')
         # training loop
         log_path = os.path.join(self.output_dir, "logs.json.txt")
         with JsonLogger(log_path) as json_logger:
@@ -374,8 +376,7 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
 
                 # run diffusion sampling on a training batch
                 if (
-                    self.epoch % cfg.training.sample_every
-                ) == 0 and accelerator.is_main_process:
+                    self.epoch % cfg.training.sample_every) == 0 and accelerator.is_main_process:
                     with torch.no_grad():
                         # sample trajectory from training set, and evaluate difference
                         batch = dict_apply(
@@ -396,6 +397,10 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
                             gt_action = batch["action"]
                             pred_action = policy.predict_action(batch["obs"])
                             log_action_mse(step_log, "val", pred_action, gt_action)
+
+                            # Store the validation metric for Optuna (validation action error)
+                            best_val_metric = min(best_val_metric, step_log["val_sparse_naction_mse_error"].item())
+
 
                         del batch
                         del gt_action
@@ -442,7 +447,7 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
         accelerator.end_training()
 
         #for optimizatin
-        return train_loss
+        return best_val_metric
 
 
 @hydra.main(
