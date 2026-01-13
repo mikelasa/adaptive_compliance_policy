@@ -1,4 +1,4 @@
-name: single_arm_draw
+name: smiley
 
 # rgb vs. low_dim: raw data are either rgb images or low_dim vectors. frames are aligned within each type.
 # obs vs. action: obs data are used as policy input; action are used as labels for policy output.
@@ -99,8 +99,8 @@ shape_meta: &shape_meta
         horizon: ${task.sparse_action_horizon}
         down_sample_steps: ${task.sparse_action_down_sample_steps} # int
 
-task_name: &task_name flip_up
-dataset_path: ${oc.env:PYRITE_DATASET_FOLDERS}/draw_single_arm_good_wrench
+task_name: &task_name smiley
+dataset_path: ${oc.env:PYRITE_DATASET_FOLDERS}/smiley_single_arm
 
 env_runner: # used in workspace for computing metrics
   _target_: diffusion_policy.env_runner.real_pusht_image_runner.RealPushTImageRunner

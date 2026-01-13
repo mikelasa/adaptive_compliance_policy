@@ -1,11 +1,11 @@
 defaults:
   - _self_
   # - task: vase_wiping_conv.yaml
-  # - task: flip_up_conv.yaml
-  - task: draw_single_arm_conv.yaml
+  - task: flip_up_conv.yaml
+  # - task: smiley_single_arm.yaml
   - override hydra/sweeper: optuna
 
-name: hpo-search
+name: box_tilt
 output_dir: ${oc.env:PYRITE_CHECKPOINT_FOLDERS}
 _target_: diffusion_policy.workspace.train_diffusion_unet_image_workspace.TrainDiffusionUnetImageWorkspace
 
@@ -110,7 +110,7 @@ policy:
   kernel_size: 5
   n_groups: 8
   cond_predict_scale: True
-  input_pertub: 0.1 # reference: https://github.com/forever208/DDPM-IP
+  input_pertub: 0.0684854455525527 # reference: https://github.com/forever208/DDPM-IP
   # train multiple diffusion steps per obs encoder forward pass
   # doing this too much will cause instability!
   train_diffusion_n_samples: 1
@@ -119,30 +119,30 @@ ema:
   _target_: diffusion_policy.model.diffusion.ema_model.EMAModel
   update_after_step: 0
   inv_gamma: 1.0
-  power: 0.75
+  power: 0.7820065419014919
   min_value: 0.0
   max_value: 0.9999
 
 dataloader:
   batch_size: 128
-  num_workers: 16 #check your system
+  num_workers: 32 #check your system
   shuffle: True
   pin_memory: True
   persistent_workers: True
 
 val_dataloader:
   batch_size: 128
-  num_workers: 16
+  num_workers: 32
   shuffle: False
   pin_memory: True
   persistent_workers: True
 
 optimizer:
   _target_: torch.optim.AdamW
-  lr: 3.0e-4
+  lr: 0.00021031655633456552
   betas: [0.95, 0.999]
   eps: 1.0e-8
-  weight_decay: 1.0e-6
+  weight_decay: 9.093294700385743e-05
 
 training:
   device: "cuda:0"
@@ -151,8 +151,8 @@ training:
   resume: False
   # optimization
   lr_scheduler: cosine
-  lr_warmup_steps: 2000
-  num_epochs: 15
+  lr_warmup_steps: 1000
+  num_epochs: 500
   
   log_gradient_norm: False
 
@@ -175,7 +175,7 @@ training:
 
 
 logging:
-  project: test-epochs
+  project: flip_up_tests
   resume: False
   mode: online
   name: ${now:%Y.%m.%d-%H.%M.%S}_${task_name}_${name}
@@ -201,7 +201,7 @@ hydra:
     _target_: hydra_plugins.hydra_optuna_sweeper.optuna_sweeper.OptunaSweeper
 
     direction: minimize
-    n_trials: 2 #number of HPO trials to test
+    n_trials: 12 #number of HPO trials to test
     n_jobs: 1 #in GPU use 1
 
     sampler:
@@ -210,16 +210,17 @@ hydra:
 
     params:
       #general hyperparameters to tune
-      dataloader.batch_size: choice(64, 128)
-      optimizer.lr: interval(2e-4, 5e-4)
-      optimizer.weight_decay: interval(1e-8, 1e-4)
-      training.lr_warmup_steps: choice(500, 1000, 2000, 4000)
-      ema.power: interval(0.7, 0.85)
+      #dataloader.batch_size: choice(64, 128)
+      #optimizer.lr: interval(2e-4, 5e-4)
+      #optimizer.weight_decay: interval(1e-8, 1e-4)
+      #training.lr_warmup_steps: choice(500, 1000, 2000, 4000)
+      #ema.power: interval(0.7, 0.85)
 
       # encoder hyperparameters to tune
-      policy.input_pertub: interval(0.05, 0.15)
+      #policy.input_pertub: interval(0.05, 0.15)
+
       # vision encoder
-      #obs_encoder.reduce_pretrained_lr: choice(True, False)
+      #policy.obs_encoder.reduce_pretrained_lr: choice(True, False)
       #training.freeze_encoder: choice(True, False)
       #obs_encoder.vision_encoder_cfg.model_name: choice(
       #  'resnet34.a1_in1k',
@@ -238,8 +239,7 @@ hydra:
         #  hue: choice(0.05, 0.08, 0.1)
       
       # force encoder
-      #obs_encoder.force_encoder_cfg.feature_dim: choice(128, 256, 384, 512)
-
+      #policy.obs_encoder.force_encoder_cfg.pretrained: choice(True, False)
       # diffusion hyperparameters to tune (TODO)
 
   job:

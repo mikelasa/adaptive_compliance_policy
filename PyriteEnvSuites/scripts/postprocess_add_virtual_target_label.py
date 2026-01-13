@@ -26,7 +26,7 @@ if "PYRITE_DATASET_FOLDERS" not in os.environ:
 dataset_folder_path = os.environ.get("PYRITE_DATASET_FOLDERS")
 
 # Config for flip up (single robot)
-dataset_path = dataset_folder_path + "/wipe_single_arm"
+dataset_path = dataset_folder_path + "/box_tilt"
 id_list = [0]
 
 # # Config for vase wiping (bimanual)
@@ -36,19 +36,19 @@ id_list = [0]
 wrench_moving_average_window_size = 1000  # should be around 1s of data
 buffer = zarr.open(dataset_path, mode="r+")
 
-num_of_process = 1
+num_of_process = 32
 flag_plot = False
 fin_every_n = 50
 
 # struct that defines the parameters to simulate the penetration with a given stiffness
 stiffness_estimation_para = {
     # penetration estimator
-    "k_max": 5000,  # 1cm 50N maximum stiffness
-    "k_min": 200,  # 1cm 2.5N minimum stiffness
-    "f_low": 0.5, #lower bound of the force
-    "f_high": 5,  #upper bound of the force
+    "k_max": 1500,  # 1cm 50N maximum stiffness
+    "k_min": 100,  # 1cm 2.5N minimum stiffness
+    "f_low": 7.5, #lower bound of the force
+    "f_high": 10,  #upper bound of the force
     "dim": 6, #3 or 6, 3 for translational, 6 for full 6D
-    "characteristic_length": 0.02, #the characteristic length for rotational stiffness
+    "characteristic_length": 1, #the characteristic length for rotational stiffness
     "vel_tol": 999.002,  # (not using) vel larger than this will trigger stiffness adjustment
 }
 
@@ -161,7 +161,7 @@ def process_episode(ep, ep_data, id_list):
         ep_data[f"stiffness_{id}"] = stiffness
         print("Done")
 
-        if flag_plot:
+    if flag_plot:
             print("Plotting...")
             plt.ion()  # to run GUI event loop
             fig = plt.figure()
@@ -244,7 +244,8 @@ def process_episode(ep, ep_data, id_list):
 
             plt.draw()
             input("Press Enter to continue...")
-            return True
+    
+    return True  # Return True to indicate successful processing
 
 # dependign the number of processes, 
 if num_of_process == 1:

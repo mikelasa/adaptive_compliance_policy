@@ -40,9 +40,9 @@ id_list = [0]  # single robot
 # id_list = [0, 1] # bimanual
 
 input_dir = pathlib.Path(
-    os.environ.get("PYRITE_RAW_DATASET_FOLDERS") + "/wipe_single_arm"
+    os.environ.get("PYRITE_RAW_DATASET_FOLDERS") + "/box_tilt"
 )
-output_dir = pathlib.Path(os.environ.get("PYRITE_DATASET_FOLDERS") + "/wipe_single_arm")
+output_dir = pathlib.Path(os.environ.get("PYRITE_DATASET_FOLDERS") + "/box_tilt")
 
 robot_timestamp_dir = output_dir.joinpath("robot_timestamp")
 wrench_timestamp_dir = output_dir.joinpath("wrench_timestamp")
@@ -103,6 +103,7 @@ episode_names = os.listdir(input_dir)
 
 
 def process_one_episode(root, episode_name, input_dir, id_list):
+    # ignore hidden files and stray artifacts that are not actual episodes
     if episode_name.startswith("."):
         return True
 
@@ -110,6 +111,14 @@ def process_one_episode(root, episode_name, input_dir, id_list):
     episode_id = episode_name[8:]
     print(f"episode_name: {episode_name}, episode_id: {episode_id}")
     episode_dir = input_dir.joinpath(episode_name)
+
+    # skip anything that is not a directory or does not match expected naming
+    if not episode_dir.is_dir():
+        print(f"Skipping non-directory entry: {episode_dir}")
+        return True
+    if not episode_name.startswith("episode_"):
+        print(f"Skipping non-episode entry: {episode_dir}")
+        return True
 
     # read rgb
     data_rgb = []
