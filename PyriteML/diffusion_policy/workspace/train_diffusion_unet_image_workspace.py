@@ -295,13 +295,17 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
                             self.optimizer.zero_grad()
                             lr_scheduler.step()
 
+                        # clear cache to avoid memory leak
+                        if self.global_step % 500 == 0:
+                            torch.cuda.empty_cache()
+
                         # update ema
                         if cfg.training.use_ema:
                             ema.step(accelerator.unwrap_model(self.model))
 
                         # logging
                         model_unwrapped = accelerator.unwrap_model(self.model)
-                        raw_loss_cpu = raw_loss.item()
+                        raw_loss_cpu = raw_loss.detach().cpu().item()
                         sparse_loss = model_unwrapped.get_loss_components()
                         tepoch.set_postfix(loss=raw_loss_cpu, refresh=False)
                         train_losses.append(raw_loss_cpu)

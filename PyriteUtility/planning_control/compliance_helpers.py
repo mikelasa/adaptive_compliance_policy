@@ -378,11 +378,12 @@ class VirtualTargetEstimator:
         #   rotational stiffness: Nm/rad -> Nm/rad / m^2 = N / m, 1Nm/rad -> 100 N/m
 
         # Extract forces (negative because of convention)
-        f = -wrench_T[: self.dim]
+        f = wrench_T[: self.dim]
         f_reg = f.copy()
         # 
         if self.dim == 6:
             f_reg[3:] = f_reg[3:] / self.characteristic_length
+            #print("f_reg: ", f_reg)
 
         # Compute adaptive stiffness based on force magnitude
         f_norm = np.linalg.norm(f_reg)

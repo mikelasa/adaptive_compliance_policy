@@ -26,7 +26,7 @@ if "PYRITE_DATASET_FOLDERS" not in os.environ:
 dataset_folder_path = os.environ.get("PYRITE_DATASET_FOLDERS")
 
 # Config for flip up (single robot)
-dataset_path = dataset_folder_path + "/box_tilt"
+dataset_path = dataset_folder_path + "/flip_up_2_2000k"
 id_list = [0]
 
 # # Config for vase wiping (bimanual)
@@ -43,12 +43,12 @@ fin_every_n = 50
 # struct that defines the parameters to simulate the penetration with a given stiffness
 stiffness_estimation_para = {
     # penetration estimator
-    "k_max": 1500,  # 1cm 50N maximum stiffness
-    "k_min": 100,  # 1cm 2.5N minimum stiffness
-    "f_low": 7.5, #lower bound of the force
-    "f_high": 10,  #upper bound of the force
+    "k_max": 4000,  # 1cm 50N maximum stiffness
+    "k_min": 2000,  # 1cm 2.5N minimum stiffness
+    "f_low": 6.5, #lower bound of the force
+    "f_high": 12,  #upper bound of the force
     "dim": 6, #3 or 6, 3 for translational, 6 for full 6D
-    "characteristic_length": 1, #the characteristic length for rotational stiffness
+    "characteristic_length": 0.1, #the characteristic length for rotational stiffness
     "vel_tol": 999.002,  # (not using) vel larger than this will trigger stiffness adjustment
 }
 
@@ -75,6 +75,7 @@ def process_episode(ep, ep_data, id_list):
         Noffset = 200
         wrench_offset = np.mean(wrench[:Noffset], axis=0)
         print("wrench offset: ", wrench_offset)
+        wrench = wrench - wrench_offset
 
         # # FT300 only: flip the sign of the wrench
         # for i in range(6):

@@ -5,7 +5,7 @@ defaults:
   # - task: smiley_single_arm.yaml
   - override hydra/sweeper: optuna
 
-name: box_tilt
+name: flip_up_2_2000k_num_train_timesteps100
 output_dir: ${oc.env:PYRITE_CHECKPOINT_FOLDERS}
 _target_: diffusion_policy.workspace.train_diffusion_unet_image_workspace.TrainDiffusionUnetImageWorkspace
 
@@ -20,7 +20,7 @@ policy:
   
   noise_scheduler:
     _target_: diffusers.DDIMScheduler
-    num_train_timesteps: 50
+    num_train_timesteps: 100
     beta_start: 0.0001
     beta_end: 0.02
     # beta_schedule is important
@@ -125,14 +125,14 @@ ema:
 
 dataloader:
   batch_size: 128
-  num_workers: 32 #check your system
+  num_workers: 24 #32 falla por memoria
   shuffle: True
   pin_memory: True
   persistent_workers: True
 
 val_dataloader:
   batch_size: 128
-  num_workers: 32
+  num_workers: 24
   shuffle: False
   pin_memory: True
   persistent_workers: True
@@ -152,7 +152,7 @@ training:
   # optimization
   lr_scheduler: cosine
   lr_warmup_steps: 1000
-  num_epochs: 500
+  num_epochs: 300
   
   log_gradient_norm: False
 
@@ -175,7 +175,7 @@ training:
 
 
 logging:
-  project: flip_up_tests
+  project: flip_up_test
   resume: False
   mode: online
   name: ${now:%Y.%m.%d-%H.%M.%S}_${task_name}_${name}
@@ -201,7 +201,7 @@ hydra:
     _target_: hydra_plugins.hydra_optuna_sweeper.optuna_sweeper.OptunaSweeper
 
     direction: minimize
-    n_trials: 12 #number of HPO trials to test
+    n_trials: 10 #number of HPO trials to test
     n_jobs: 1 #in GPU use 1
 
     sampler:
@@ -227,16 +227,8 @@ hydra:
       #  'vit_base_patch32_clip_224.openai',
       #  'convnext_base.clip_laion2b_augreg_ft_in12k'
       #)
-      #obs_encoder.vision_encoder_cfg.pretrained: choice(True, False)
+      # policy.obs_encoder.vision_encoder_cfg.pretrained: choice(True, False)
       #obs_encoder.vision_encoder_cfg.frozen: choice(True, False)
-      #obs_encoder.vision_encoder_cfg.transforms:
-        #- type: RandomCrop
-        #  ratio: choice(0.9, 0.95, 1.0)
-        #- _target_: torchvision.transforms.ColorJitter
-        #  brightness: choice(0.2, 0.3, 0.4)
-        #  contrast: choice(0.3, 0.4, 0.5)
-        #  saturation: choice(0.4, 0.5, 0.6)
-        #  hue: choice(0.05, 0.08, 0.1)
       
       # force encoder
       #policy.obs_encoder.force_encoder_cfg.pretrained: choice(True, False)
