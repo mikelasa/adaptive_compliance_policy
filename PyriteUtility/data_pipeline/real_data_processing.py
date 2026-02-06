@@ -40,9 +40,9 @@ id_list = [0]  # single robot
 # id_list = [0, 1] # bimanual
 
 input_dir = pathlib.Path(
-    os.environ.get("PYRITE_RAW_DATASET_FOLDERS") + "/flip_up_2"
+    os.environ.get("PYRITE_RAW_DATASET_FOLDERS") + "/flip_up_230_demo_strategy_fixed_demos"
 )
-output_dir = pathlib.Path(os.environ.get("PYRITE_DATASET_FOLDERS") + "/flip_up_2")
+output_dir = pathlib.Path(os.environ.get("PYRITE_DATASET_FOLDERS") + "/flip_up_230_demo_strategy_fixed_demos")
 
 robot_timestamp_dir = output_dir.joinpath("robot_timestamp")
 wrench_timestamp_dir = output_dir.joinpath("wrench_timestamp")

@@ -100,7 +100,7 @@ shape_meta: &shape_meta
         down_sample_steps: ${task.sparse_action_down_sample_steps} # int
 
 task_name: &task_name flip_up
-dataset_path: ${oc.env:PYRITE_DATASET_FOLDERS}/flip_up_2_2000k
+dataset_path: ${oc.env:PYRITE_DATASET_FOLDERS}/flip_up_230_demo_strategy_fixed_demos
 
 env_runner: # used in workspace for computing metrics
   _target_: diffusion_policy.env_runner.real_pusht_image_runner.RealPushTImageRunner

@@ -5,7 +5,7 @@ defaults:
   # - task: smiley_single_arm.yaml
   - override hydra/sweeper: optuna
 
-name: flip_up_2_2000k_num_train_timesteps100
+name: flip_up_230_demo_strategy_fixed_demos
 output_dir: ${oc.env:PYRITE_CHECKPOINT_FOLDERS}
 _target_: diffusion_policy.workspace.train_diffusion_unet_image_workspace.TrainDiffusionUnetImageWorkspace
 
@@ -20,7 +20,7 @@ policy:
   
   noise_scheduler:
     _target_: diffusers.DDIMScheduler
-    num_train_timesteps: 100
+    num_train_timesteps: 50
     beta_start: 0.0001
     beta_end: 0.02
     # beta_schedule is important
@@ -125,14 +125,14 @@ ema:
 
 dataloader:
   batch_size: 128
-  num_workers: 24 #32 falla por memoria
+  num_workers: 16 #32 falla por memoria
   shuffle: True
   pin_memory: True
   persistent_workers: True
 
 val_dataloader:
   batch_size: 128
-  num_workers: 24
+  num_workers: 16
   shuffle: False
   pin_memory: True
   persistent_workers: True
