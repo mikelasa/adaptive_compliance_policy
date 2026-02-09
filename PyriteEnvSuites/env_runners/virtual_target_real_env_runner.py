@@ -52,7 +52,7 @@ def main():
     pipeline_para = {
         "save_low_dim_every_N_frame": 1,
         "save_visual_every_N_frame": 1,
-        "ckpt_path": "/2026.02.04_09.35.09_flip_up_new_flip_up_2_290demos_1500k/checkpoints/latest.ckpt",
+        "ckpt_path": "/2026.02.06_18.17.42_flip_up_new_flip_up_230_demo_strategy_fixed_demos/checkpoints/latest.ckpt",
         # "hardware_config_path": hardware_config_folder_path + "/manip_server_config_left_arm.yaml",
         "hardware_config_path": hardware_config_folder_path
         + "/single_arm_data_collection_franka.yaml",

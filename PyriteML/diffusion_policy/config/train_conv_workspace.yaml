@@ -5,7 +5,7 @@ defaults:
   # - task: smiley_single_arm.yaml
   - override hydra/sweeper: optuna
 
-name: flip_up_230_demo_strategy_fixed_demos
+name: flip_up_230_original
 output_dir: ${oc.env:PYRITE_CHECKPOINT_FOLDERS}
 _target_: diffusion_policy.workspace.train_diffusion_unet_image_workspace.TrainDiffusionUnetImageWorkspace
 
