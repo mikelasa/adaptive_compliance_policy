@@ -40,9 +40,9 @@ id_list = [0]  # single robot
 # id_list = [0, 1] # bimanual
 
 input_dir = pathlib.Path(
-    os.environ.get("PYRITE_RAW_DATASET_FOLDERS") + "/flip_up_230_demo_strategy_fixed_demos"
+    os.environ.get("PYRITE_RAW_DATASET_FOLDERS") + "/wipe_profile"
 )
-output_dir = pathlib.Path(os.environ.get("PYRITE_DATASET_FOLDERS") + "/flip_up_230_demo_strategy_fixed_demos")
+output_dir = pathlib.Path(os.environ.get("PYRITE_DATASET_FOLDERS") + "/wipe_profile_curved_170")
 
 robot_timestamp_dir = output_dir.joinpath("robot_timestamp")
 wrench_timestamp_dir = output_dir.joinpath("wrench_timestamp")
@@ -234,7 +234,7 @@ def process_one_episode(root, episode_name, input_dir, id_list):
     )
     return True
 
-
+"""
 with concurrent.futures.ProcessPoolExecutor(max_workers=3) as executor:
     futures = [
         executor.submit(
@@ -250,6 +250,10 @@ with concurrent.futures.ProcessPoolExecutor(max_workers=3) as executor:
         if not future.result():
             raise RuntimeError("Multi-processing failed!")
 
+"""
+for episode_name in episode_names:
+    process_one_episode(root, episode_name, input_dir, id_list)
+            
 print("Finished reading. Now start generating metadata")
 from PyriteUtility.computer_vision.imagecodecs_numcodecs import register_codecs
 

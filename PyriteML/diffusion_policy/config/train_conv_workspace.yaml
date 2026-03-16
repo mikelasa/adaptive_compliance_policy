@@ -5,7 +5,7 @@ defaults:
   # - task: smiley_single_arm.yaml
   - override hydra/sweeper: optuna
 
-name: flip_up_230_original
+name: wipe_profile_curved_190
 output_dir: ${oc.env:PYRITE_CHECKPOINT_FOLDERS}
 _target_: diffusion_policy.workspace.train_diffusion_unet_image_workspace.TrainDiffusionUnetImageWorkspace
 
@@ -125,14 +125,14 @@ ema:
 
 dataloader:
   batch_size: 128
-  num_workers: 16 #32 falla por memoria
+  num_workers: 24 #32 falla por memoria
   shuffle: True
   pin_memory: True
   persistent_workers: True
 
 val_dataloader:
   batch_size: 128
-  num_workers: 16
+  num_workers: 24
   shuffle: False
   pin_memory: True
   persistent_workers: True
@@ -152,7 +152,7 @@ training:
   # optimization
   lr_scheduler: cosine
   lr_warmup_steps: 1000
-  num_epochs: 300
+  num_epochs: 200
   
   log_gradient_norm: False
 
@@ -175,7 +175,7 @@ training:
 
 
 logging:
-  project: flip_up_test
+  project: wipe_profile
   resume: False
   mode: online
   name: ${now:%Y.%m.%d-%H.%M.%S}_${task_name}_${name}
@@ -201,7 +201,7 @@ hydra:
     _target_: hydra_plugins.hydra_optuna_sweeper.optuna_sweeper.OptunaSweeper
 
     direction: minimize
-    n_trials: 10 #number of HPO trials to test
+    n_trials: 4 #number of HPO trials to test
     n_jobs: 1 #in GPU use 1
 
     sampler:
@@ -209,31 +209,8 @@ hydra:
       seed: 42
 
     params:
-      #general hyperparameters to tune
-      #dataloader.batch_size: choice(64, 128)
-      #optimizer.lr: interval(2e-4, 5e-4)
-      #optimizer.weight_decay: interval(1e-8, 1e-4)
-      #training.lr_warmup_steps: choice(500, 1000, 2000, 4000)
-      #ema.power: interval(0.7, 0.85)
-
-      # encoder hyperparameters to tune
-      #policy.input_pertub: interval(0.05, 0.15)
-
-      # vision encoder
-      #policy.obs_encoder.reduce_pretrained_lr: choice(True, False)
-      #training.freeze_encoder: choice(True, False)
-      #obs_encoder.vision_encoder_cfg.model_name: choice(
-      #  'resnet34.a1_in1k',
-      #  'vit_base_patch32_clip_224.openai',
-      #  'convnext_base.clip_laion2b_augreg_ft_in12k'
-      #)
-      # policy.obs_encoder.vision_encoder_cfg.pretrained: choice(True, False)
-      #obs_encoder.vision_encoder_cfg.frozen: choice(True, False)
+      #task.dataset_path: "${oc.env:PYRITE_DATASET_FOLDERS}/wipe_profile_66,${oc.env:PYRITE_DATASET_FOLDERS}/wipe_profile_100"
       
-      # force encoder
-      #policy.obs_encoder.force_encoder_cfg.pretrained: choice(True, False)
-      # diffusion hyperparameters to tune (TODO)
-
   job:
     override_dirname: ${name}
   run:
