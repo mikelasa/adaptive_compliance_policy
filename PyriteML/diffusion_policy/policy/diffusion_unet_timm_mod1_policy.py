@@ -20,6 +20,11 @@ from diffusion_policy.model.diffusion.mask_generator import LowdimMaskGenerator
 from diffusion_policy.model.vision.timm_obs_encoder_with_force import (
     TimmObsEncoderWithForce,
 )
+#CHANGE
+from diffusion_policy.model.vision.timm_obs_encoder_bi_cross import (
+    TimmObsEncoderWithForceV2,
+)
+
 from diffusion_policy.common.pytorch_util import dict_apply
 
 from PyriteUtility.data_pipeline.data_plotting import plot_ts_action
@@ -31,7 +36,7 @@ class DiffusionUnetTimmMod1Policy(BaseImagePolicy):
         self,
         shape_meta: dict,
         noise_scheduler: DDPMScheduler,
-        obs_encoder: TimmObsEncoderWithForce,
+        obs_encoder: TimmObsEncoderWithForceV2, #CHANGE
         num_inference_steps=None,
         diffusion_step_embed_dim=256,
         down_dims=(256, 512, 1024),

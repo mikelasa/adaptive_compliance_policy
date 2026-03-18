@@ -11,6 +11,7 @@ import logging
 from diffusion_policy.model.common.module_attr_mixin import ModuleAttrMixin
 from diffusion_policy.common.pytorch_util import replace_submodules
 from diffusion_policy.model.vision.utils.cross_attention import CrossAttention
+from diffusion_policy.model.vision.utils.attention_pool import AttentionPool1d
 
 # from diffusion_policy.model.vision.force_spec_encoder import ForceSpecEncoder, convert_to_spec
 from multimodal_representation.multimodal.models.base_models.encoders import (
@@ -20,52 +21,7 @@ from multimodal_representation.multimodal.models.base_models.encoders import (
 
 logger = logging.getLogger(__name__)
 
-
-class AttentionPool2d(nn.Module):
-    def __init__(
-        self, spacial_dim: int, embed_dim: int, num_heads: int, output_dim: int = None
-    ):
-        super().__init__()
-        self.positional_embedding = nn.Parameter(
-            torch.randn(spacial_dim**2 + 1, embed_dim) / embed_dim**0.5
-        )
-        self.k_proj = nn.Linear(embed_dim, embed_dim)
-        self.q_proj = nn.Linear(embed_dim, embed_dim)
-        self.v_proj = nn.Linear(embed_dim, embed_dim)
-        self.c_proj = nn.Linear(embed_dim, output_dim or embed_dim)
-        self.num_heads = num_heads
-
-    def forward(self, x):
-        x = x.flatten(start_dim=2).permute(2, 0, 1)  # NCHW -> (HW)NC
-        x = torch.cat([x.mean(dim=0, keepdim=True), x], dim=0)  # (HW+1)NC
-        x = x + self.positional_embedding[:, None, :].to(x.dtype)  # (HW+1)NC
-        x, _ = F.multi_head_attention_forward(
-            query=x[:1],
-            key=x,
-            value=x,
-            embed_dim_to_check=x.shape[-1],
-            num_heads=self.num_heads,
-            q_proj_weight=self.q_proj.weight,
-            k_proj_weight=self.k_proj.weight,
-            v_proj_weight=self.v_proj.weight,
-            in_proj_weight=None,
-            in_proj_bias=torch.cat(
-                [self.q_proj.bias, self.k_proj.bias, self.v_proj.bias]
-            ),
-            bias_k=None,
-            bias_v=None,
-            add_zero_attn=False,
-            dropout_p=0,
-            out_proj_weight=self.c_proj.weight,
-            out_proj_bias=self.c_proj.bias,
-            use_separate_proj_weight=True,
-            training=self.training,
-            need_weights=False,
-        )
-        return x.squeeze(0)
-
-
-class TimmObsEncoderWithForce(ModuleAttrMixin):
+class TimmObsEncoderWithForceV2(ModuleAttrMixin):
     def __init__(
         self,
         shape_meta: dict,
@@ -83,8 +39,10 @@ class TimmObsEncoderWithForce(ModuleAttrMixin):
         Assumes rgb input: B,T,C,H,W
         Assumes low_dim input: B,T,D
         """
+
         super().__init__()
 
+        # parse shapes
         rgb_keys = list()
         low_dim_keys = list()
         wrench_keys = list()
@@ -94,7 +52,10 @@ class TimmObsEncoderWithForce(ModuleAttrMixin):
 
         model_list = []
         feature_dim_list = []
+
+        # create config for vision encoder and force encoder
         for cfg in [vision_encoder_cfg, force_encoder_cfg]:
+            # force encoder is 5 layer 1D conv with stride 2, input 6 dim force data, output feature dim 768
             if cfg.model_name == "causalconv":
                 model = ForceEncoder(cfg.feature_dim)
             else:
@@ -104,43 +65,22 @@ class TimmObsEncoderWithForce(ModuleAttrMixin):
                     global_pool=cfg.global_pool,
                     num_classes=0,
                 )
+            
+            # if frozen, no gradients
             if cfg.frozen:
                 assert cfg.pretrained
                 for param in model.parameters():
                     param.requires_grad = False
-
-            if cfg.model_name.startswith("resnet"):
-                # the last layer is nn.Identity() because num_classes is 0
-                # second last layer is AdaptivePool2d, which is also identity because global_pool is empty
-                if cfg.downsample_ratio == 32:
-                    modules = list(model.children())[:-2]
-                    model = torch.nn.Sequential(*modules)
-                    feature_dim = 512
-                elif cfg.downsample_ratio == 16:
-                    modules = list(model.children())[:-3]
-                    model = torch.nn.Sequential(*modules)
-                    feature_dim = 256
-                else:
-                    raise NotImplementedError(
-                        f"Unsupported downsample_ratio: {cfg.downsample_ratio}"
-                    )
-            elif cfg.model_name.startswith("convnext"):
-                # the last layer is nn.Identity() because num_classes is 0
-                # second last layer is AdaptivePool2d, which is also identity because global_pool is empty
-                if cfg.downsample_ratio == 32:
-                    modules = list(model.children())[:-2]
-                    model = torch.nn.Sequential(*modules)
-                    feature_dim = 1024
-                else:
-                    raise NotImplementedError(
-                        f"Unsupported downsample_ratio: {cfg.downsample_ratio}"
-                    )
-            elif cfg.model_name == "causalconv":
+            
+            #  feature dim setup
+            if cfg.model_name == "causalconv":
                 feature_dim = cfg.feature_dim
             else:
                 feature_dim = 768
+            #append to list
             feature_dim_list.append(feature_dim)
 
+            # add group norm if specified
             if cfg.use_group_norm and not cfg.pretrained:
                 model = replace_submodules(
                     root_module=model,
@@ -155,20 +95,22 @@ class TimmObsEncoderWithForce(ModuleAttrMixin):
                     ),
                 )
             model_list.append(model)
-
+            
+        #model list
         vision_encoder, force_encoder = model_list
         self.v_feature_dim, self.f_feature_dim = feature_dim_list
-        if force_encoder_cfg.model_name.startswith("resnet"):
-            force_encoder = ForceEncoder(force_encoder, force_encoder_cfg.norm_spec)
 
+        # assign keys to encoders based on input shape
         image_shape = None
         obs_shape_meta = shape_meta["obs"]
+        # meta_shape has rgb and low_dim keys
         for key, attr in obs_shape_meta.items():
             shape = tuple(attr["shape"])
             type = attr.get("type", "low_dim")
             if type == "rgb":
                 assert image_shape is None or image_shape == shape[1:]
                 image_shape = shape[1:]
+        # apply transforms if specified in config, for vision encoder only
         if vision_encoder_cfg.transforms is not None and not isinstance(
             vision_encoder_cfg.transforms[0], torch.nn.Module
         ):
@@ -184,10 +126,12 @@ class TimmObsEncoderWithForce(ModuleAttrMixin):
             else torch.nn.Sequential(*vision_encoder_cfg.transforms)
         )
 
+        # assign keys to encoders and transforms
         for key, attr in obs_shape_meta.items():
             shape = tuple(attr["shape"])
             type = attr.get("type", "low_dim")
             key_shape_map[key] = shape
+            # for rgb input, assign vision encoder and vision transform
             if type == "rgb":
                 rgb_keys.append(key)
 
@@ -198,6 +142,7 @@ class TimmObsEncoderWithForce(ModuleAttrMixin):
                 )
                 key_model_map[key] = vision_encoder
                 key_transform_map[key] = vision_transform
+            # for low_dim input, assign force encoder if it's wrench data, otherwise ignore by default (can be included by setting "ignore_by_policy" to False in config)
             elif type == "low_dim":
                 if "wrench" in key:
                     print("key_model_map adding wrench key:", key)
@@ -216,7 +161,8 @@ class TimmObsEncoderWithForce(ModuleAttrMixin):
                 pass
             else:
                 raise RuntimeError(f"Unsupported obs type: {type}")
-
+            
+        # 
         rgb_keys = sorted(rgb_keys)
         low_dim_keys = sorted(low_dim_keys)
         print("rgb keys:         ", rgb_keys)
@@ -234,11 +180,8 @@ class TimmObsEncoderWithForce(ModuleAttrMixin):
         self.key_shape_map = key_shape_map
         self.position_encoding = position_encoding
 
-        feature_map_shape = [
-            x // vision_encoder_cfg.downsample_ratio for x in image_shape
-        ]
         if vision_encoder_cfg.model_name.startswith("vit"):
-            # assert self.feature_aggregation is None # vit uses the CLS token
+            # if vision encoder is vit
             if vision_encoder_cfg.feature_aggregation == "all_tokens":
                 # Use all tokens from ViT
                 pass
@@ -247,53 +190,11 @@ class TimmObsEncoderWithForce(ModuleAttrMixin):
                     f"vit will use the CLS token. feature_aggregation ({vision_encoder_cfg.feature_aggregation}) is ignored!"
                 )
                 vision_encoder_cfg.feature_aggregation = None
+        # TODO: add dinoV3
 
-        if vision_encoder_cfg.feature_aggregation == "soft_attention":
-            self.attention = nn.Sequential(
-                nn.Linear(feature_dim, 1, bias=False), nn.Softmax(dim=1)
-            )
-        elif vision_encoder_cfg.feature_aggregation == "spatial_embedding":
-            self.spatial_embedding = torch.nn.Parameter(
-                torch.randn(feature_map_shape[0] * feature_map_shape[1], feature_dim)
-            )
-        elif vision_encoder_cfg.feature_aggregation == "transformer":
-            if position_encoding == "learnable":
-                self.position_embedding = torch.nn.Parameter(
-                    torch.randn(
-                        feature_map_shape[0] * feature_map_shape[1] + 1, feature_dim
-                    )
-                )
-            elif position_encoding == "sinusoidal":
-                num_features = feature_map_shape[0] * feature_map_shape[1] + 1
-                self.position_embedding = torch.zeros(num_features, feature_dim)
-                position = torch.arange(0, num_features, dtype=torch.float).unsqueeze(1)
-                div_term = torch.exp(
-                    torch.arange(0, feature_dim, 2).float()
-                    * (-math.log(2 * num_features) / feature_dim)
-                )
-                self.position_embedding[:, 0::2] = torch.sin(position * div_term)
-                self.position_embedding[:, 1::2] = torch.cos(position * div_term)
-            self.aggregation_transformer = nn.TransformerEncoder(
-                encoder_layer=nn.TransformerEncoderLayer(d_model=feature_dim, nhead=4),
-                num_layers=4,
-            )
-        elif vision_encoder_cfg.feature_aggregation == "attention_pool_2d":
-            self.attention_pool_2d = AttentionPool2d(
-                spacial_dim=feature_map_shape[0],
-                embed_dim=feature_dim,
-                num_heads=feature_dim // 64,
-                output_dim=feature_dim,
-            )
-        logger.info(
-            "number of parameters: %e", sum(p.numel() for p in self.parameters())
-        )
 
-        if fuse_mode == "mlp":
-            self.mlp = nn.Sequential(
-                nn.Linear(self.v_feature_dim * 3, 1024), nn.ReLU(), nn.Linear(1024, 512)
-            )
-
-        elif fuse_mode == "modality-attention":
+        #fuse mode is self attention
+        if fuse_mode == "modality-attention":
             self.transformer_encoder = torch.nn.TransformerEncoderLayer(
                 d_model=self.v_feature_dim,
                 nhead=8,
@@ -301,9 +202,17 @@ class TimmObsEncoderWithForce(ModuleAttrMixin):
                 batch_first=True,
                 dropout=0.0,
             )
-            n_features = len(rgb_keys) * shape_meta["sample"]["obs"]["sparse"]["rgb_0"][
-                "horizon"
-            ] + len(wrench_keys)
+            rgb_horizon = shape_meta["sample"]["obs"]["sparse"]["rgb_0"]["horizon"]
+            if vision_encoder_cfg.feature_aggregation == "all_tokens":
+                # each ViT frame produces (H/patch * W/patch + 1) tokens (patches + CLS)
+                n_patches = (image_shape[0] // vision_encoder_cfg.downsample_ratio) * \
+                            (image_shape[1] // vision_encoder_cfg.downsample_ratio)
+                n_img_tokens_per_frame = n_patches + 1  # +1 for CLS
+                n_rgb_tokens = len(rgb_keys) * rgb_horizon * n_img_tokens_per_frame
+            else:
+                # CLS only: 1 token per frame
+                n_rgb_tokens = len(rgb_keys) * rgb_horizon
+            n_features = n_rgb_tokens + len(wrench_keys)
             self.linear_projection = nn.Linear(
                 self.v_feature_dim * n_features, self.v_feature_dim
             )
@@ -311,47 +220,44 @@ class TimmObsEncoderWithForce(ModuleAttrMixin):
                 self.position_embedding = torch.nn.Parameter(
                     torch.randn(n_features, self.v_feature_dim)
                 )
-        # integrate bi directional cross attention between modalities
+
+                # integrate bi directional cross attention between modalities
         elif fuse_mode == "bi-cross-attention":
-            self.img_cross_attention = CrossAttention(model_dim=self.v_feature_dim, num_heads=4)
-            self.force_cross_attention = CrossAttention(model_dim=self.f_feature_dim, num_heads=4)
+            self.img_cross_attention   = CrossAttention(model_dim=self.v_feature_dim, num_heads=4)
+            self.force_cross_attention = CrossAttention(model_dim=self.v_feature_dim, num_heads=4)
+
+            # compute fixed token count for the pool
+            rgb_horizon = shape_meta["sample"]["obs"]["sparse"][rgb_keys[0]]["horizon"]
+            if vision_encoder_cfg.feature_aggregation == "all_tokens":
+                n_patches = (image_shape[0] // vision_encoder_cfg.downsample_ratio) * \
+                            (image_shape[1] // vision_encoder_cfg.downsample_ratio)
+                tokens_per_frame = n_patches + 1  # +1 for CLS
+            else:
+                tokens_per_frame = 1  # CLS only
+            total_tokens = len(rgb_keys) * rgb_horizon * tokens_per_frame + len(wrench_keys)
+
+            self.attn_pool = AttentionPool1d(
+                seq_len=total_tokens,
+                embed_dim=self.v_feature_dim,
+                num_heads=8,
+                output_dim=self.v_feature_dim
+            )
+
+        logger.info(
+            "number of parameters: %e", sum(p.numel() for p in self.parameters())
+        )
 
     def aggregate_feature(self, model_name, agg_mode, feature):
         if model_name.startswith("vit"):
-            assert agg_mode is None  # vit uses the CLS token
-            return feature[:, 0, :]
-
-        # resnet
-        assert len(feature.shape) == 4
-        if agg_mode == "attention_pool_2d":
-            return self.attention_pool_2d(feature)
-
-        feature = torch.flatten(feature, start_dim=-2)  # B, 512, 7*7
-        feature = torch.transpose(feature, 1, 2)  # B, 7*7, 512
-
-        if agg_mode == "avg":
-            return torch.mean(feature, dim=[1])
-        elif agg_mode == "max":
-            return torch.amax(feature, dim=[1])
-        elif agg_mode == "soft_attention":
-            weight = self.attention(feature)
-            return torch.sum(feature * weight, dim=1)
-        elif agg_mode == "spatial_embedding":
-            return torch.mean(feature * self.spatial_embedding, dim=1)
-        elif agg_mode == "transformer":
-            zero_feature = torch.zeros(
-                feature.shape[0], 1, feature.shape[-1], device=feature.device
-            )
-            if self.position_embedding.device != feature.device:
-                self.position_embedding = self.position_embedding.to(feature.device)
-            feature_with_pos_embedding = (
-                torch.concat([zero_feature, feature], dim=1) + self.position_embedding
-            )
-            feature_output = self.aggregation_transformer(feature_with_pos_embedding)
-            return feature_output[:, 0]
-        else:
-            assert agg_mode is None
-            return feature
+            if agg_mode is None:
+                # Use only CLS token
+                return feature[:, 0, :]  # (B, D)
+            elif agg_mode == "all_tokens":
+                # Use all tokens (including CLS, or skip CLS if desired)
+                return feature  # (B, N+1, D)
+            else:
+                raise ValueError(f"Unknown agg_mode: {agg_mode}")
+        
 
     def forward(self, obs_dict):
         """Assume each image key is (B, T, C, H, W)"""
@@ -360,23 +266,39 @@ class TimmObsEncoderWithForce(ModuleAttrMixin):
         low_dim_features = list()
         batch_size = next(iter(obs_dict.values())).shape[0]
 
-        # process rgb input
         for key in self.rgb_keys:
-            img = obs_dict[key] # (B, T, 3, 224, 224)
+            img = obs_dict[key]  # (B, T, 3, H, W)
             B, T = img.shape[:2]
             assert B == batch_size
             assert img.shape[2:] == self.key_shape_map[key]
-            img = img.reshape(B * T, *img.shape[2:]) # (B*T, 3, 224, 224)
-            img = self.key_transform_map[key](img) #transforms if any
-            raw_feature = self.key_model_map[key](img) # encoder (B*T, 50 (49 patches + 1CLS), 768)
+            img = img.reshape(B * T, *img.shape[2:])  # (B*T, 3, H, W)
+            img = self.key_transform_map[key](img)
+
+            # frozen backbone: no activation storage for backprop
+            if self.vision_encoder_cfg.frozen:
+                with torch.no_grad():
+                    raw_feature = self.key_model_map[key](img)
+            else:
+                raw_feature = self.key_model_map[key](img)
+
             feature = self.aggregate_feature(
                 model_name=self.vision_encoder_cfg.model_name,
                 agg_mode=self.vision_encoder_cfg.feature_aggregation,
                 feature=raw_feature,
-            ) # (B*T, 768) only takes CLS for ViT (shoul keep all tokens for bi-cross attention?)
-            assert len(feature.shape) == 2 and feature.shape[0] == B * T
-            features.append(feature.reshape(B, -1)) # (B, T*768)
-            modality_features.append(feature.reshape(B, T, -1)) # (B, T, 768)
+            )
+
+            # depending on CLS or all tokens, feature shape is (B*T, D) or (B*T, N+1, D)
+            if feature.ndim == 2:  # (B*T, D) - CLS only
+                features.append(feature.reshape(B, -1))  # (B, T*D)
+                modality_features.append(feature.reshape(B, T, -1))  # (B, T, D)
+            elif feature.ndim == 3:  # (B*T, N, D) - all tokens
+                N = feature.shape[1]
+                feature = feature.reshape(B, T, N, -1)  # (B, T, N, D)
+                feature_flat = feature.reshape(B, T * N, -1)  # (B, T*N, D)
+                features.append(feature_flat.reshape(B, -1))  # (B, T*N*D)
+                modality_features.append(feature_flat)  # (B, T*N, D)
+            else:
+                raise RuntimeError(f"Unexpected feature shape: {feature.shape}")
 
         for key in self.wrench_keys:
             data = obs_dict[key] # (B, T, 6)
@@ -385,7 +307,7 @@ class TimmObsEncoderWithForce(ModuleAttrMixin):
             assert data.shape[2:] == self.key_shape_map[key]
             data = data.permute(0, 2, 1) # (B, 6, T) because ForceEncoder expects (B, C, T)
             feature = self.key_model_map[key](data.float()) #encoder (B, 768, T/32) 32 caused by 5 conv layers with stride 2, then take the last time step (B, 768)     
-            feature = feature[:, :, 0] # take the first time step feature, which has the most recent force information (B, 768)
+            feature = feature[:, :, -1] # take the last time step feature, which has the most recent force information (B, 768)
             assert len(feature.shape) == 2 and feature.shape[0] == B
             features.append(feature.reshape(B, -1)) # (B, 768)
             modality_features.append(feature.unsqueeze(1)) # (B, 1, 768)
@@ -400,14 +322,11 @@ class TimmObsEncoderWithForce(ModuleAttrMixin):
             features.append(data.reshape(B, -1))
             low_dim_features.append(data.reshape(B, -1))
 
-        # concatenate all features
-        if self.fuse_mode == "concat":
-            result = torch.cat(features, dim=-1)
-        elif self.fuse_mode == "mlp":
-            result = self.mlp(torch.cat(modality_features, dim=-1))
-            result = torch.concat([result, torch.cat(low_dim_features, dim=-1)], dim=1)
-        elif self.fuse_mode == "modality-attention":
+        if self.fuse_mode == "modality-attention":
+            #print RGB and force feature shapes before attention
+            #print(f"modality features shapes before attention: {[f.shape for f in modality_features]}") # should be [(B, T, 768), (B, 1, 768)]
             in_embeds = torch.cat(modality_features, dim=1)  # [batch, n_features, D]
+            #print(f"in_embeds shape: {in_embeds.shape}") # should be (B, T+1, 768) for CLS or (B, T*N+1, 768) for all tokens
             if self.position_encoding == "learnable":
                 if self.position_embedding.device != in_embeds.device:
                     self.position_embedding = self.position_embedding.to(feature.device)
@@ -418,9 +337,24 @@ class TimmObsEncoderWithForce(ModuleAttrMixin):
             )
             result = self.linear_projection(result)
             result = torch.concat([result, torch.cat(low_dim_features, dim=-1)], dim=1)
+        
+
+        elif self.fuse_mode == "bi-cross-attention":
+            n_rgb = len(self.rgb_keys)
+            rgb_tokens   = torch.cat(modality_features[:n_rgb], dim=1)  # (B, T*N, 768)
+            force_tokens = torch.cat(modality_features[n_rgb:], dim=1)  # (B, 1,   768)
+
+            img_feat   = self.img_cross_attention(img_feat=rgb_tokens,   ft_feat=force_tokens)
+            force_feat = self.force_cross_attention(img_feat=force_tokens, ft_feat=rgb_tokens)
+
+            fused = torch.cat([img_feat, force_feat], dim=1)  # (B, total_tokens, 768)
+            result = self.attn_pool(fused)                     # (B, 768)
+
+            if low_dim_features:
+                result = torch.cat([result, torch.cat(low_dim_features, dim=-1)], dim=-1)  # (B, 768 + 27)
 
         return result
-
+    
     @torch.no_grad()
     def output_shape(self):
         example_obs_dict = dict()
@@ -438,14 +372,17 @@ class TimmObsEncoderWithForce(ModuleAttrMixin):
             )
             example_obs_dict[key] = this_obs
         example_output = self.forward(example_obs_dict)
-        assert len(example_output.shape) == 2
+        if self.fuse_mode == "bi-cross-attention":
+            assert len(example_output.shape) == 2  # (1, total_tokens, D)
+        else:
+            assert len(example_output.shape) == 2  # (1, flat_dim)
         assert example_output.shape[0] == 1
 
         return example_output.shape
 
 
 if __name__ == "__main__":
-    timm_obs_encoder_with_force = TimmObsEncoderWithForce(
+    timm_obs_encoder_with_force = TimmObsEncoderWithForceV2(
         shape_meta=None,
         model_name="resnet18.a1_in1k",
         pretrained=False,

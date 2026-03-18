@@ -1,4 +1,4 @@
-name: flip_up_new
+name: test_only_bi_cross
 
 # rgb vs. low_dim: raw data are either rgb images or low_dim vectors. frames are aligned within each type.
 # obs vs. action: obs data are used as policy input; action are used as labels for policy output.

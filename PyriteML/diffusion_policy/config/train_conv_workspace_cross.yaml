@@ -1,0 +1,188 @@
+defaults:
+  - _self_
+  # - task: vase_wiping_conv.yaml
+  - task: flip_up_conv.yaml
+  # - task: smiley_single_arm.yaml
+  - override hydra/sweeper: optuna
+
+name: bi_cross_all_tokens_250ep
+output_dir: ${oc.env:PYRITE_CHECKPOINT_FOLDERS}
+_target_: diffusion_policy.workspace.train_diffusion_unet_image_workspace.TrainDiffusionUnetImageWorkspace
+
+task_name: ${task.name}
+shape_meta: ${task.shape_meta}
+exp_name: "default"
+
+policy:
+  _target_: diffusion_policy.policy.diffusion_unet_timm_mod1_policy.DiffusionUnetTimmMod1Policy
+
+  shape_meta: ${shape_meta}
+  
+  noise_scheduler:
+    _target_: diffusers.DDIMScheduler
+    num_train_timesteps: 100
+    beta_start: 0.0001
+    beta_end: 0.02
+    # beta_schedule is important
+    # this is the best we found
+    beta_schedule: squaredcos_cap_v2
+    clip_sample: True
+    set_alpha_to_one: True
+    steps_offset: 0
+    prediction_type: epsilon # or sample
+
+  obs_encoder:
+    _target_: diffusion_policy.model.vision.timm_obs_encoder_bi_cross.TimmObsEncoderWithForceV2
+    shape_meta: ${shape_meta}
+    fuse_mode: bi-cross-attention #modality-attention #bi-cross-attention
+    reduce_pretrained_lr: True
+    position_encoding: null
+
+    vision_encoder_cfg:
+      model_name: 'vit_base_patch32_clip_224.openai'
+      pretrained: True
+      frozen: True
+      global_pool: ''
+
+      feature_aggregation: null # TODO: all_tokens (49 patches + CLS) fix memory issues #null (only CLS)
+
+      # used for feature_map_shape computation (vit patch32: 224/32=7)
+      downsample_ratio: 32
+
+      transforms:
+        - type: RandomCrop
+          ratio: 0.95
+        - _target_: torchvision.transforms.ColorJitter
+          brightness: 0.3
+          contrast: 0.4
+          saturation: 0.5
+          hue: 0.08
+
+      use_group_norm: True
+      share_rgb_model: False
+      imagenet_norm: True
+    
+    force_encoder_cfg:
+      model_name: causalconv
+      feature_dim: 384
+      frozen: False
+      pretrained: False
+      use_group_norm: False
+      share_force_model: False
+
+  num_inference_steps: 16 # 8
+  diffusion_step_embed_dim: 32
+  down_dims: [256,512,1024]
+  kernel_size: 5
+  n_groups: 8
+  cond_predict_scale: True
+  input_pertub: 0.0684854455525527 # reference: https://github.com/forever208/DDPM-IP
+  # train multiple diffusion steps per obs encoder forward pass
+  # doing this too much will cause instability!
+  train_diffusion_n_samples: 1
+
+ema:
+  _target_: diffusion_policy.model.diffusion.ema_model.EMAModel
+  update_after_step: 0
+  inv_gamma: 1.0
+  power: 0.7820065419014919
+  min_value: 0.0
+  max_value: 0.9999
+
+dataloader:
+  batch_size: 128
+  num_workers: 24
+  shuffle: True
+  pin_memory: True
+  persistent_workers: True
+
+val_dataloader:
+  batch_size: 128
+  num_workers: 24
+  shuffle: False
+  pin_memory: True
+  persistent_workers: True
+
+optimizer:
+  _target_: torch.optim.AdamW
+  lr: 0.00021031655633456552
+  betas: [0.95, 0.999]
+  eps: 1.0e-8
+  weight_decay: 9.093294700385743e-05
+
+training:
+  device: "cuda:0"
+  seed: 42
+  debug: False
+  resume: False
+  # optimization
+  lr_scheduler: cosine
+  lr_warmup_steps: 1000
+  num_epochs: 250 #200                                #EPOCS
+  
+  log_gradient_norm: False
+
+  gradient_accumulate_every: 8
+  # EMA destroys performance when used with BatchNorm
+  # replace BatchNorm with GroupNorm.
+  use_ema: True
+  freeze_encoder: False
+  # training loop control
+  # in epochs
+  rollout_every: 10
+  checkpoint_every: 10
+  val_every: 5
+  sample_every: 5 #validation sampling
+  # steps per epoch
+  max_train_steps: null
+  max_val_steps: null
+  # misc
+  tqdm_interval_sec: 1.0
+
+
+logging:
+  project: test_bi_Cross
+  resume: False
+  mode: offline
+  name: ${now:%Y.%m.%d-%H.%M.%S}_${task_name}_${name}
+  tags: ["${name}", "${task_name}", "${exp_name}"]
+  id: null
+  group: null
+
+checkpoint:
+  topk:
+    monitor_key: val_sparse_naction_mse_error
+    mode: min
+    k: 20
+    format_str: 'epoch={epoch:04d}-train_loss={train_loss:.3f}.ckpt'
+  save_last_ckpt: True
+  save_last_snapshot: False
+
+multi_run:
+  run_dir: ${output_dir}/${now:%Y.%m.%d}_${now:%H.%M.%S}_${task_name}_${name}
+  wandb_name_base: ${now:%Y.%m.%d-%H.%M.%S}_${task_name}_${name}
+
+hydra:
+  sweeper:
+    _target_: hydra_plugins.hydra_optuna_sweeper.optuna_sweeper.OptunaSweeper
+
+    direction: minimize
+    n_trials: 4 #number of HPO trials to test
+    n_jobs: 1 #in GPU use 1
+
+    sampler:
+      _target_: optuna.samplers.TPESampler
+      seed: 42
+
+    params:
+      #task.dataset_path: "${oc.env:PYRITE_DATASET_FOLDERS}/wipe_profile_66,${oc.env:PYRITE_DATASET_FOLDERS}/wipe_profile_100"
+      
+  job:
+    override_dirname: ${name}
+  run:
+    dir: ${output_dir}/${now:%Y.%m.%d}_${now:%H.%M.%S}_${task_name}_${name}
+  sweep:
+    dir: ${output_dir}/${now:%Y.%m.%d}_${now:%H.%M.%S}_${task_name}_${name}
+    subdir: ${hydra.job.num}
+
+  
