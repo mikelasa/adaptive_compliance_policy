@@ -12,6 +12,13 @@ from diffusion_policy.model.common.module_attr_mixin import ModuleAttrMixin
 from diffusion_policy.common.pytorch_util import replace_submodules
 from diffusion_policy.model.vision.utils.cross_attention import CrossAttention
 from diffusion_policy.model.vision.utils.attention_pool import AttentionPool1d
+from dual_attention.dual_attn_blocks import DualAttnEncoderBlock
+from dual_attention.symbol_retrieval import (
+    PositionalSymbolRetriever,
+    PositionRelativeSymbolRetriever,
+    SymbolicAttention,
+    RelationalSymbolicAttention,
+)
 
 # from diffusion_policy.model.vision.force_spec_encoder import ForceSpecEncoder, convert_to_spec
 from multimodal_representation.multimodal.models.base_models.encoders import (
@@ -34,6 +41,11 @@ class TimmObsEncoderWithForceV2(ModuleAttrMixin):
         # renormalize rgb input with imagenet normalization
         # assuming input in [0,1]
         position_encoding: str = "learnable",
+        use_relational_features: bool = False,
+        symbol_retriever: str = "positional",  # positional | position_relative | symbolic | relational_symbolic
+        symbol_retriever_cfg: dict = None,
+        bi_cross_heads: int = 4,
+        DAT_heads: int = 4,
     ):
         """
         Assumes rgb input: B,T,C,H,W
@@ -172,6 +184,7 @@ class TimmObsEncoderWithForceV2(ModuleAttrMixin):
         self.force_encoder_cfg = force_encoder_cfg
         self.shape_meta = shape_meta
         self.fuse_mode = fuse_mode
+        self.use_relational_features = use_relational_features
         self.key_model_map = key_model_map
         self.key_transform_map = key_transform_map
         self.rgb_keys = rgb_keys
@@ -185,7 +198,7 @@ class TimmObsEncoderWithForceV2(ModuleAttrMixin):
             if vision_encoder_cfg.feature_aggregation == "all_tokens":
                 # Use all tokens from ViT
                 pass
-            elif vision_encoder_cfg.feature_aggregation is not None:
+            elif vision_encoder_cfg.feature_aggregation not in (None, "cls"):
                 logger.warn(
                     f"vit will use the CLS token. feature_aggregation ({vision_encoder_cfg.feature_aggregation}) is ignored!"
                 )
@@ -223,8 +236,8 @@ class TimmObsEncoderWithForceV2(ModuleAttrMixin):
 
                 # integrate bi directional cross attention between modalities
         elif fuse_mode == "bi-cross-attention":
-            self.img_cross_attention   = CrossAttention(model_dim=self.v_feature_dim, num_heads=4)
-            self.force_cross_attention = CrossAttention(model_dim=self.v_feature_dim, num_heads=4)
+            self.img_cross_attention   = CrossAttention(model_dim=self.v_feature_dim, num_heads=bi_cross_heads)
+            self.force_cross_attention = CrossAttention(model_dim=self.v_feature_dim, num_heads=bi_cross_heads)
 
             # compute fixed token count for the pool
             rgb_horizon = shape_meta["sample"]["obs"]["sparse"][rgb_keys[0]]["horizon"]
@@ -243,13 +256,61 @@ class TimmObsEncoderWithForceV2(ModuleAttrMixin):
                 output_dim=self.v_feature_dim
             )
 
+            if use_relational_features:
+                assert vision_encoder_cfg.feature_aggregation == "all_tokens", \
+                    "use_relational_features=True requires feature_aggregation=all_tokens"
+                cfg = symbol_retriever_cfg or {}
+                D = self.v_feature_dim
+                if symbol_retriever == "positional":
+                    self.symbol_retriever = PositionalSymbolRetriever(
+                        symbol_dim=D,
+                        max_length=total_tokens,
+                    )
+                    ra_kwargs = {}
+                elif symbol_retriever == "position_relative":
+                    # returns (L, L, D) — RelationalAttention handles this with use_relative_positional_symbols=True
+                    self.symbol_retriever = PositionRelativeSymbolRetriever(
+                        symbol_dim=D,
+                        max_rel_pos=cfg.get("max_rel_pos", total_tokens // 2),
+                    )
+                    ra_kwargs = {"use_relative_positional_symbols": True}
+                elif symbol_retriever == "symbolic":
+                    self.symbol_retriever = SymbolicAttention(
+                        d_model=D,
+                        n_heads=cfg.get("n_heads", 4),
+                        n_symbols=cfg.get("n_symbols", 64),
+                    )
+                    ra_kwargs = {}
+                elif symbol_retriever == "relational_symbolic":
+                    self.symbol_retriever = RelationalSymbolicAttention(
+                        d_model=D,
+                        rel_n_heads=cfg.get("rel_n_heads", 4),
+                        symbolic_attn_n_heads=cfg.get("symbolic_attn_n_heads", 4),
+                        n_symbols=cfg.get("n_symbols", 64),
+                        nbhd_delta=cfg.get("nbhd_delta", 5),
+                    )
+                    ra_kwargs = {}
+                else:
+                    raise ValueError(f"Unknown symbol_retriever: '{symbol_retriever}'. "
+                                     f"Choose from: positional, position_relative, symbolic, relational_symbolic")
+                self.dual_attn_block = DualAttnEncoderBlock(
+                    d_model=self.v_feature_dim,
+                    n_heads_sa=DAT_heads,
+                    n_heads_ra=DAT_heads,
+                    dff=2048,
+                    activation='gelu',
+                    dropout_rate=0.0,
+                    norm_first=True,
+                    ra_kwargs=ra_kwargs,
+                )
+
         logger.info(
             "number of parameters: %e", sum(p.numel() for p in self.parameters())
         )
 
     def aggregate_feature(self, model_name, agg_mode, feature):
         if model_name.startswith("vit"):
-            if agg_mode is None:
+            if agg_mode is None or agg_mode == "cls":
                 # Use only CLS token
                 return feature[:, 0, :]  # (B, D)
             elif agg_mode == "all_tokens":
@@ -348,6 +409,11 @@ class TimmObsEncoderWithForceV2(ModuleAttrMixin):
             force_feat = self.force_cross_attention(img_feat=force_tokens, ft_feat=rgb_tokens)
 
             fused = torch.cat([img_feat, force_feat], dim=1)  # (B, total_tokens, 768)
+
+            if self.use_relational_features:
+                symbols = self.symbol_retriever(fused)         # (B,L,D) or (L,L,D) for position_relative
+                fused = self.dual_attn_block(fused, symbols)   # (B, total_tokens, 768)
+
             result = self.attn_pool(fused)                     # (B, 768)
 
             if low_dim_features:

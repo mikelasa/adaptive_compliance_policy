@@ -5,7 +5,7 @@ defaults:
   # - task: smiley_single_arm.yaml
   - override hydra/sweeper: optuna
 
-name: bi_cross_all_tokens_250ep
+name: ${policy.obs_encoder.fuse_mode}_${policy.obs_encoder.vision_encoder_cfg.feature_aggregation}
 output_dir: ${oc.env:PYRITE_CHECKPOINT_FOLDERS}
 _target_: diffusion_policy.workspace.train_diffusion_unet_image_workspace.TrainDiffusionUnetImageWorkspace
 
@@ -34,7 +34,17 @@ policy:
   obs_encoder:
     _target_: diffusion_policy.model.vision.timm_obs_encoder_bi_cross.TimmObsEncoderWithForceV2
     shape_meta: ${shape_meta}
-    fuse_mode: bi-cross-attention #modality-attention #bi-cross-attention
+    fuse_mode: bi-cross-attention #modality-attention | bi-cross-attention
+    
+    bi_cross_heads: 4               # heads in both CrossAttention modules
+    use_relational_features: false  # enable DAT (only with feature_aggregation: all_tokens)
+    DAT_heads: 4                   # heads for n_heads_sa and n_heads_ra in DualAttnEncoderBlock
+    symbol_retriever: positional    # positional | position_relative | symbolic | relational_symbolic
+    # symbol_retriever_cfg:         # optional overrides per retriever type:
+    #   positional:           (no params)
+    #   position_relative:    max_rel_pos: 50
+    #   symbolic:             n_heads: 4, n_symbols: 64
+    #   relational_symbolic:  rel_n_heads: 4, symbolic_attn_n_heads: 4, n_symbols: 64, nbhd_delta: 5
     reduce_pretrained_lr: True
     position_encoding: null
 
@@ -44,10 +54,10 @@ policy:
       frozen: True
       global_pool: ''
 
-      feature_aggregation: null # TODO: all_tokens (49 patches + CLS) fix memory issues #null (only CLS)
-
       # used for feature_map_shape computation (vit patch32: 224/32=7)
       downsample_ratio: 32
+
+      feature_aggregation: cls  # all_tokens | cls (CLS token only)
 
       transforms:
         - type: RandomCrop
@@ -118,7 +128,7 @@ training:
   # optimization
   lr_scheduler: cosine
   lr_warmup_steps: 1000
-  num_epochs: 250 #200                                #EPOCS
+  num_epochs: 200 #200                                #EPOCS
   
   log_gradient_norm: False
 
@@ -141,9 +151,9 @@ training:
 
 
 logging:
-  project: test_bi_Cross
+  project: biCross_DAT
   resume: False
-  mode: offline
+  mode: online
   name: ${now:%Y.%m.%d-%H.%M.%S}_${task_name}_${name}
   tags: ["${name}", "${task_name}", "${exp_name}"]
   id: null
@@ -175,7 +185,8 @@ hydra:
       seed: 42
 
     params:
-      #task.dataset_path: "${oc.env:PYRITE_DATASET_FOLDERS}/wipe_profile_66,${oc.env:PYRITE_DATASET_FOLDERS}/wipe_profile_100"
+      policy.obs_encoder.fuse_mode: choice(modality-attention,bi-cross-attention)
+      policy.obs_encoder.vision_encoder_cfg.feature_aggregation: choice(cls,all_tokens)
       
   job:
     override_dirname: ${name}

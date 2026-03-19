@@ -1,4 +1,4 @@
-name: test_only_bi_cross
+name: flip_up_230
 
 # rgb vs. low_dim: raw data are either rgb images or low_dim vectors. frames are aligned within each type.
 # obs vs. action: obs data are used as policy input; action are used as labels for policy output.
@@ -100,7 +100,7 @@ shape_meta: &shape_meta
         down_sample_steps: ${task.sparse_action_down_sample_steps} # int
 
 task_name: &task_name flip_up
-dataset_path: ${oc.env:PYRITE_DATASET_FOLDERS}/wipe_profile_curved_190
+dataset_path: ${oc.env:PYRITE_DATASET_FOLDERS}/flip_up_230
 
 env_runner: # used in workspace for computing metrics
   _target_: diffusion_policy.env_runner.real_pusht_image_runner.RealPushTImageRunner
