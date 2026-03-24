@@ -10,7 +10,6 @@ import logging
 
 from diffusion_policy.model.common.module_attr_mixin import ModuleAttrMixin
 from diffusion_policy.common.pytorch_util import replace_submodules
-from diffusion_policy.model.vision.utils.cross_attention import CrossAttention
 
 # from diffusion_policy.model.vision.force_spec_encoder import ForceSpecEncoder, convert_to_spec
 from multimodal_representation.multimodal.models.base_models.encoders import (
@@ -311,10 +310,6 @@ class TimmObsEncoderWithForce(ModuleAttrMixin):
                 self.position_embedding = torch.nn.Parameter(
                     torch.randn(n_features, self.v_feature_dim)
                 )
-        # integrate bi directional cross attention between modalities
-        elif fuse_mode == "bi-cross-attention":
-            self.img_cross_attention = CrossAttention(model_dim=self.v_feature_dim, num_heads=4)
-            self.force_cross_attention = CrossAttention(model_dim=self.f_feature_dim, num_heads=4)
 
     def aggregate_feature(self, model_name, agg_mode, feature):
         if model_name.startswith("vit"):
@@ -362,33 +357,32 @@ class TimmObsEncoderWithForce(ModuleAttrMixin):
 
         # process rgb input
         for key in self.rgb_keys:
-            img = obs_dict[key] # (B, T, 3, 224, 224)
+            img = obs_dict[key]
             B, T = img.shape[:2]
             assert B == batch_size
             assert img.shape[2:] == self.key_shape_map[key]
-            img = img.reshape(B * T, *img.shape[2:]) # (B*T, 3, 224, 224)
-            img = self.key_transform_map[key](img) #transforms if any
-            raw_feature = self.key_model_map[key](img) # encoder (B*T, 50 (49 patches + 1CLS), 768)
+            img = img.reshape(B * T, *img.shape[2:])
+            img = self.key_transform_map[key](img)
+            raw_feature = self.key_model_map[key](img)
             feature = self.aggregate_feature(
                 model_name=self.vision_encoder_cfg.model_name,
                 agg_mode=self.vision_encoder_cfg.feature_aggregation,
                 feature=raw_feature,
-            ) # (B*T, 768) only takes CLS for ViT (shoul keep all tokens for bi-cross attention?)
+            )
             assert len(feature.shape) == 2 and feature.shape[0] == B * T
-            features.append(feature.reshape(B, -1)) # (B, T*768)
-            modality_features.append(feature.reshape(B, T, -1)) # (B, T, 768)
+            features.append(feature.reshape(B, -1))
+            modality_features.append(feature.reshape(B, T, -1))
 
         for key in self.wrench_keys:
-            data = obs_dict[key] # (B, T, 6)
+            data = obs_dict[key]
             B, T = data.shape[:2]
             assert B == batch_size
             assert data.shape[2:] == self.key_shape_map[key]
-            data = data.permute(0, 2, 1) # (B, 6, T) because ForceEncoder expects (B, C, T)
-            feature = self.key_model_map[key](data.float()) #encoder (B, 768, T/32) 32 caused by 5 conv layers with stride 2, then take the last time step (B, 768)     
-            feature = feature[:, :, 0] # take the first time step feature, which has the most recent force information (B, 768)
+            data = data.permute(0, 2, 1)
+            feature = self.key_model_map[key](data.float())[:, :, 0]
             assert len(feature.shape) == 2 and feature.shape[0] == B
-            features.append(feature.reshape(B, -1)) # (B, 768)
-            modality_features.append(feature.unsqueeze(1)) # (B, 1, 768)
+            features.append(feature.reshape(B, -1))
+            modality_features.append(feature.unsqueeze(1))
 
         # process lowdim input
         for key in self.low_dim_keys:

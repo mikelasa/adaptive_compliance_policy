@@ -36,7 +36,7 @@ class DiffusionUnetTimmMod1Policy(BaseImagePolicy):
         self,
         shape_meta: dict,
         noise_scheduler: DDPMScheduler,
-        obs_encoder: TimmObsEncoderWithForceV2, #CHANGE
+        obs_encoder: TimmObsEncoderWithForce, #CHANGE
         num_inference_steps=None,
         diffusion_step_embed_dim=256,
         down_dims=(256, 512, 1024),

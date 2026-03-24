@@ -5,7 +5,7 @@ defaults:
   # - task: smiley_single_arm.yaml
   - override hydra/sweeper: optuna
 
-name: wipe_profile_curved_190
+name: ${policy.obs_encoder.fuse_mode}_TimmObsEncoderWithForce
 output_dir: ${oc.env:PYRITE_CHECKPOINT_FOLDERS}
 _target_: diffusion_policy.workspace.train_diffusion_unet_image_workspace.TrainDiffusionUnetImageWorkspace
 
@@ -125,17 +125,17 @@ ema:
 
 dataloader:
   batch_size: 128
-  num_workers: 24 #32 falla por memoria
+  num_workers: 32 #32 falla por memoria
   shuffle: True
   pin_memory: True
-  persistent_workers: True
+  persistent_workers: false
 
 val_dataloader:
   batch_size: 128
-  num_workers: 24
+  num_workers: 32
   shuffle: False
   pin_memory: True
-  persistent_workers: True
+  persistent_workers: false
 
 optimizer:
   _target_: torch.optim.AdamW
@@ -152,7 +152,7 @@ training:
   # optimization
   lr_scheduler: cosine
   lr_warmup_steps: 1000
-  num_epochs: 200
+  num_epochs: 300
   
   log_gradient_norm: False
 
@@ -175,7 +175,7 @@ training:
 
 
 logging:
-  project: wipe_profile
+  project: biCross_DAT
   resume: False
   mode: online
   name: ${now:%Y.%m.%d-%H.%M.%S}_${task_name}_${name}
@@ -209,7 +209,7 @@ hydra:
       seed: 42
 
     params:
-      #task.dataset_path: "${oc.env:PYRITE_DATASET_FOLDERS}/wipe_profile_66,${oc.env:PYRITE_DATASET_FOLDERS}/wipe_profile_100"
+      task.dataset_path: "${oc.env:PYRITE_DATASET_FOLDERS}/flip_up_230_original,${oc.env:PYRITE_DATASET_FOLDERS}/flip_up_230"
       
   job:
     override_dirname: ${name}

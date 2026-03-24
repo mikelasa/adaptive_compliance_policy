@@ -5,7 +5,7 @@ defaults:
   # - task: smiley_single_arm.yaml
   - override hydra/sweeper: optuna
 
-name: ${policy.obs_encoder.fuse_mode}_${policy.obs_encoder.vision_encoder_cfg.feature_aggregation}_bi_cross_script
+name: ${policy.obs_encoder.fuse_mode}_TimmObsEncoderWithForce_bi_cross
 output_dir: ${oc.env:PYRITE_CHECKPOINT_FOLDERS}
 _target_: diffusion_policy.workspace.train_diffusion_unet_image_workspace.TrainDiffusionUnetImageWorkspace
 
@@ -20,7 +20,7 @@ policy:
   
   noise_scheduler:
     _target_: diffusers.DDIMScheduler
-    num_train_timesteps: 100
+    num_train_timesteps: 50
     beta_start: 0.0001
     beta_end: 0.02
     # beta_schedule is important
@@ -34,30 +34,18 @@ policy:
   obs_encoder:
     _target_: diffusion_policy.model.vision.timm_obs_encoder_bi_cross.TimmObsEncoderWithForceV2
     shape_meta: ${shape_meta}
-    fuse_mode: modality-attention #modality-attention | bi-cross-attention
-    
-    bi_cross_heads: 4               # heads in both CrossAttention modules
-    use_relational_features: false  # enable DAT (only with feature_aggregation: all_tokens)
-    DAT_heads: 4                   # heads for n_heads_sa and n_heads_ra in DualAttnEncoderBlock
-    symbol_retriever: positional    # positional | position_relative | symbolic | relational_symbolic
-    # symbol_retriever_cfg:         # optional overrides per retriever type:
-    #   positional:           (no params)
-    #   position_relative:    max_rel_pos: 50
-    #   symbolic:             n_heads: 4, n_symbols: 64
-    #   relational_symbolic:  rel_n_heads: 4, symbolic_attn_n_heads: 4, n_symbols: 64, nbhd_delta: 5
+    fuse_mode: bi-cross-attention #modality-attention | bi-cross-attention
     reduce_pretrained_lr: True
     position_encoding: null
 
     vision_encoder_cfg:
       model_name: 'vit_base_patch32_clip_224.openai'
       pretrained: True
-      frozen: True
+      frozen: False
       global_pool: ''
 
-      # used for feature_map_shape computation (vit patch32: 224/32=7)
+      # patch_size=32 → 224/32=7 → 7x7=49 patches + 1 CLS = 50 tokens per frame
       downsample_ratio: 32
-
-      feature_aggregation: cls  # all_tokens | cls (CLS token only)
 
       transforms:
         - type: RandomCrop
@@ -70,14 +58,10 @@ policy:
 
       use_group_norm: True
       share_rgb_model: False
-      imagenet_norm: True
-    
+
     force_encoder_cfg:
-      model_name: causalconv
-      feature_dim: 384
+      feature_dim: 384  
       frozen: False
-      pretrained: False
-      use_group_norm: False
       share_force_model: False
 
   num_inference_steps: 16 # 8
@@ -101,14 +85,14 @@ ema:
 
 dataloader:
   batch_size: 128
-  num_workers: 32
+  num_workers: 16 #32 falla por memoria
   shuffle: True
   pin_memory: True
   persistent_workers: false
 
 val_dataloader:
   batch_size: 128
-  num_workers: 32
+  num_workers: 16
   shuffle: False
   pin_memory: True
   persistent_workers: false
@@ -128,11 +112,11 @@ training:
   # optimization
   lr_scheduler: cosine
   lr_warmup_steps: 1000
-  num_epochs: 300 #200                                #EPOCS
+  num_epochs: 300
   
   log_gradient_norm: False
 
-  gradient_accumulate_every: 8
+  gradient_accumulate_every: 1
   # EMA destroys performance when used with BatchNorm
   # replace BatchNorm with GroupNorm.
   use_ema: True
@@ -185,8 +169,7 @@ hydra:
       seed: 42
 
     params:
-      #policy.obs_encoder.fuse_mode: choice(modality-attention,bi-cross-attention)
-      #policy.obs_encoder.vision_encoder_cfg.feature_aggregation: choice(cls,all_tokens)
+      #task.dataset_path: "${oc.env:PYRITE_DATASET_FOLDERS}/flip_up_230_original,${oc.env:PYRITE_DATASET_FOLDERS}/flip_up_230"
       
   job:
     override_dirname: ${name}
