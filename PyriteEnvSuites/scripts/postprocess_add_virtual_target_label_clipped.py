@@ -26,7 +26,7 @@ if "PYRITE_DATASET_FOLDERS" not in os.environ:
 dataset_folder_path = os.environ.get("PYRITE_DATASET_FOLDERS")
 
 # Config for flip up (single robot)
-dataset_path = dataset_folder_path + "/flip_up_230_500"
+dataset_path = dataset_folder_path + "/flip_up_230_500_20N"
 id_list = [0]
 
 # # Config for vase wiping (bimanual)
@@ -36,21 +36,19 @@ id_list = [0]
 wrench_moving_average_window_size = 1000  # should be around 1s of data
 buffer = zarr.open(dataset_path, mode="r+")
 
-num_of_process = 1
-flag_plot = True
+num_of_process = 32
+flag_plot = False
 fin_every_n = 50
 
-# struct that defines the parameters to simulate the penetration with a given stiffness
-# stiffness range 200-4000, high limit still pending for real tests results.
 stiffness_estimation_para = {
-    # penetration estimator
-    "k_max": 2000,  # 1cm 50N maximum stiffness
-    "k_min": 500,  # 1cm 2.5N minimum stiffness
-    "f_low": 7.5, #lower bound of the force
-    "f_high": 30,  #upper bound of the force
-    "dim": 3, #3 or 6, 3 for translational, 6 for full 6D
-    "characteristic_length": 1, #the characteristic length for rotational stiffness
-    "vel_tol": 999.002,  # (not using) vel larger than this will trigger stiffness adjustment
+    "k_max": 2000,
+    "k_min": 500,
+    "f_low": 7.5,
+    "f_high": 20,
+    "max_disp": 0.04,  #  k_min * 0.04 = 20N max
+    "dim": 3,
+    "characteristic_length": 1,
+    "vel_tol": 999.002,
 }
 
 flag_real = False
@@ -61,28 +59,27 @@ if flag_plot:
     assert num_of_process == 1, "Plotting is not supported for multi-process"
 
 
+def cap_displacement(pos_TC, max_disp):
+    """Cap virtual target displacement magnitude, preserving direction."""
+    norm = np.linalg.norm(pos_TC)
+    if norm > max_disp:
+        return pos_TC / norm * max_disp
+    return pos_TC
+
+
 def process_episode(ep, ep_data, id_list):
-    #for each episode, for robot in id_list:
     for id in id_list:
         print(f"Processing episode {ep}, id {id}: ")
-        #extract robot pose and wrench
         ts_pose_fb = ep_data[f"ts_pose_fb_{id}"]
         wrench = ep_data[f"wrench_{id}"]
 
-        # pre-allocate moving average array
         wrench_moving_average = np.zeros_like(wrench)
 
-        # remove wrench measurement offset
         Noffset = 200
         wrench_offset = np.mean(wrench[:Noffset], axis=0)
         print("wrench offset: ", wrench_offset)
         wrench = wrench - wrench_offset
 
-        # # FT300 only: flip the sign of the wrench
-        # for i in range(6):
-        #     wrench[:, i] = -wrench[:, i]
-
-        # filter wrench using moving average
         N = wrench_moving_average_window_size
         print("Computing moving average")
         # fmt: off
@@ -96,13 +93,12 @@ def process_episode(ep, ep_data, id_list):
         wrench_time_stamps = ep_data[f"wrench_time_stamps_{id}"]
         robot_time_stamps = ep_data[f"robot_time_stamps_{id}"]
 
-        if not flag_real:  # for simulation data
+        if not flag_real:
             ft_sensor_pose_fb = ep_data["ft_sensor_pose_fb"]
 
         num_robot_time_steps = len(robot_time_stamps)
 
         print("creating virtual target estimator")
-
         pe = ch.VirtualTargetEstimator(
             stiffness_estimation_para["k_max"],
             stiffness_estimation_para["k_min"],
@@ -122,10 +118,8 @@ def process_episode(ep, ep_data, id_list):
             pose7_WT = ts_pose_fb[t]
             SE3_WT = SE3.Rt(q2r(pose7_WT[3:7]), pose7_WT[0:3], check=False)
 
-            # find the id in wrench_time_stamps where the time is closest to robot_time_stamps[t]
             t_wrench = np.argmin(np.abs(wrench_time_stamps - robot_time_stamps[t]))
 
-            #apply moving average 
             if flag_real:
                 wrench_T = wrench_moving_average[t_wrench]
             else:
@@ -135,23 +129,20 @@ def process_episode(ep, ep_data, id_list):
                 SE3_ST = SE3_WS.inv() * SE3_WT
                 wrench_T = SE3_ST.Ad().T @ wrench_S
 
-            # compute velocity twist with a window of 20 time steps (10 before and 10 after)
             half_window_size = 10
             id_start = max(0, t - half_window_size)
             id_end = min(num_robot_time_steps - 1, t + half_window_size)
-            window_size = id_end - id_start
 
-            # compute twist rel_pose =  inv(SE3_start) * SE3_end
             SE3_start = su.pose7_to_SE3(ts_pose_fb[id_start])
             SE3_end = su.pose7_to_SE3(ts_pose_fb[id_end])
             twist_diff = su.SE3_to_spt(su.SE3_inv(SE3_start) @ SE3_end)
 
-            # compute stiffness
             if stiffness_estimation_para["dim"] == 6:
                 k, mat_TC, flag_adjusted = pe.update(wrench_T, twist_diff)
                 SE3_TC = SE3(mat_TC)
             else:
                 k, pos_TC, flag_adjusted = pe.update(wrench_T, twist_diff)
+                pos_TC = cap_displacement(pos_TC, stiffness_estimation_para["max_disp"])
                 SE3_TC = SE3.Rt(np.eye(3), pos_TC)
             SE3_WC = SE3_WT * SE3_TC
 
@@ -164,109 +155,94 @@ def process_episode(ep, ep_data, id_list):
         print("Done")
 
     if flag_plot:
-            print("Plotting...")
-            plt.ion()  # to run GUI event loop
-            fig = plt.figure()
-            ax = plt.axes(projection="3d")
-            x = np.linspace(-0.02, 0.2, 20)
-            y = np.linspace(-0.1, 0.1, 20)
-            z = np.linspace(-0.1, 0.1, 20)
-            ax.plot3D(x, y, z, color="blue", marker="o", markersize=3)
-            ax.plot3D(x, y, z, color="red", marker="o", markersize=3)
-            ax.set_title("Target and virtual target")
-            ax.set_xlabel("X")
-            ax.set_ylabel("Y")
-            ax.set_zlabel("Z")
-            plt.show()
+        print("Plotting...")
+        plt.ion()
+        fig = plt.figure()
+        ax = plt.axes(projection="3d")
+        x = np.linspace(-0.02, 0.2, 20)
+        y = np.linspace(-0.1, 0.1, 20)
+        z = np.linspace(-0.1, 0.1, 20)
+        ax.plot3D(x, y, z, color="blue", marker="o", markersize=3)
+        ax.plot3D(x, y, z, color="red", marker="o", markersize=3)
+        ax.set_title("Target and virtual target")
+        ax.set_xlabel("X")
+        ax.set_ylabel("Y")
+        ax.set_zlabel("Z")
+        plt.show()
 
-            ax.cla()
+        ax.cla()
+        ax.plot3D(
+            ts_pose_fb[..., 0],
+            ts_pose_fb[..., 1],
+            ts_pose_fb[..., 2],
+            color="red",
+            marker="o",
+            markersize=2,
+        )
+        ax.plot3D(
+            ts_pose_virtual_target[..., 0],
+            ts_pose_virtual_target[..., 1],
+            ts_pose_virtual_target[..., 2],
+            color="blue",
+            marker="o",
+            markersize=2,
+        )
+        ts_pose_fb_adjusted = np.array(ts_pose_fb)[mask_adjusted]
+        ts_pose_virtual_target_adjusted = ts_pose_virtual_target[mask_adjusted]
+        ax.plot3D(
+            ts_pose_fb_adjusted[..., 0],
+            ts_pose_fb_adjusted[..., 1],
+            ts_pose_fb_adjusted[..., 2],
+            color="yellow",
+            marker="o",
+            markersize=3,
+        )
+        ax.plot3D(
+            ts_pose_virtual_target_adjusted[..., 0],
+            ts_pose_virtual_target_adjusted[..., 1],
+            ts_pose_virtual_target_adjusted[..., 2],
+            color="green",
+            marker="o",
+            markersize=3,
+        )
+        ax.plot3D(
+            ts_pose_fb[0][0],
+            ts_pose_fb[0][1],
+            ts_pose_fb[0][2],
+            color="black",
+            marker="o",
+            markersize=8,
+        )
+        for i in np.arange(0, num_robot_time_steps, fin_every_n):
             ax.plot3D(
-                ts_pose_fb[..., 0],
-                ts_pose_fb[..., 1],
-                ts_pose_fb[..., 2],
-                color="red",
-                marker="o",
-                markersize=2,
-            )
-
-            ax.plot3D(
-                ts_pose_virtual_target[..., 0],
-                ts_pose_virtual_target[..., 1],
-                ts_pose_virtual_target[..., 2],
-                color="blue",
-                marker="o",
-                markersize=2,
-            )
-            # adjusted points
-            ts_pose_fb_adjusted = ts_pose_fb[mask_adjusted]
-            ts_pose_virtual_target_adjusted = ts_pose_virtual_target[mask_adjusted]
-            ax.plot3D(
-                ts_pose_fb_adjusted[..., 0],
-                ts_pose_fb_adjusted[..., 1],
-                ts_pose_fb_adjusted[..., 2],
-                color="yellow",
-                marker="o",
-                markersize=3,
-            )
-
-            ax.plot3D(
-                ts_pose_virtual_target_adjusted[..., 0],
-                ts_pose_virtual_target_adjusted[..., 1],
-                ts_pose_virtual_target_adjusted[..., 2],
-                color="green",
-                marker="o",
-                markersize=3,
-            )
-            # starting point
-            ax.plot3D(
-                ts_pose_fb[0][0],
-                ts_pose_fb[0][1],
-                ts_pose_fb[0][2],
+                [ts_pose_fb[i][0], ts_pose_virtual_target[i][0]],
+                [ts_pose_fb[i][1], ts_pose_virtual_target[i][1]],
+                [ts_pose_fb[i][2], ts_pose_virtual_target[i][2]],
                 color="black",
                 marker="o",
-                markersize=8,
+                markersize=2,
             )
+        ax.set_xlabel("X")
+        ax.set_ylabel("Y")
+        ax.set_zlabel("Z")
+        set_axes_equal(ax)
+        plt.draw()
+        input("Press Enter to continue...")
 
-            # fin
-            for i in np.arange(0, num_robot_time_steps, fin_every_n):
-                ax.plot3D(
-                    [ts_pose_fb[i][0], ts_pose_virtual_target[i][0]],
-                    [ts_pose_fb[i][1], ts_pose_virtual_target[i][1]],
-                    [ts_pose_fb[i][2], ts_pose_virtual_target[i][2]],
-                    color="black",
-                    marker="o",
-                    markersize=2,
-                )
+    return True
 
-            ax.set_xlabel("X")
-            ax.set_ylabel("Y")
-            ax.set_zlabel("Z")
 
-            set_axes_equal(ax)
-
-            plt.draw()
-            input("Press Enter to continue...")
-    
-    return True  # Return True to indicate successful processing
-
-# dependign the number of processes, 
 if num_of_process == 1:
     for ep, ep_data in tqdm(buffer["data"].items(), desc="Episodes"):
         process_episode(ep, ep_data, id_list)
 else:
     with concurrent.futures.ProcessPoolExecutor(max_workers=num_of_process) as executor:
         futures = [
-            executor.submit(
-                process_episode,
-                ep,
-                ep_data,
-                id_list,
-            )
+            executor.submit(process_episode, ep, ep_data, id_list)
             for ep, ep_data in tqdm(buffer["data"].items(), desc="Episodes")
         ]
         for future in concurrent.futures.as_completed(futures):
             if not future.result():
                 raise RuntimeError("Multi-processing failed!")
-
 
 print("Done!")

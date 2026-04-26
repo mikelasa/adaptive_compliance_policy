@@ -5,7 +5,7 @@ defaults:
   # - task: smiley_single_arm.yaml
   - override hydra/sweeper: optuna
 
-name: ${policy.obs_encoder.fuse_mode}_TimmObsEncoderWithForce
+name: ${policy.obs_encoder.fuse_mode}_original_500_NEW_K_LABELS_20Nfhigh
 output_dir: ${oc.env:PYRITE_CHECKPOINT_FOLDERS}
 _target_: diffusion_policy.workspace.train_diffusion_unet_image_workspace.TrainDiffusionUnetImageWorkspace
 
@@ -36,6 +36,7 @@ policy:
     shape_meta: ${shape_meta}
     fuse_mode: modality-attention
     reduce_pretrained_lr: True
+    position_encoding: learnable
 
     ##### from scratch #####
     # model_name: 'vit_base_patch16_224'
@@ -45,6 +46,7 @@ policy:
     # model_name: 'efficientnet_b3'
     # pretrained: False
     # frozen: False
+
 
     vision_encoder_cfg:
       ##### from scratch #####
@@ -152,7 +154,7 @@ training:
   # optimization
   lr_scheduler: cosine
   lr_warmup_steps: 1000
-  num_epochs: 300
+  num_epochs: 150
   
   log_gradient_norm: False
 
@@ -175,7 +177,7 @@ training:
 
 
 logging:
-  project: biCross_DAT
+  project: Flip_up_V1_new_k_post
   resume: False
   mode: online
   name: ${now:%Y.%m.%d-%H.%M.%S}_${task_name}_${name}

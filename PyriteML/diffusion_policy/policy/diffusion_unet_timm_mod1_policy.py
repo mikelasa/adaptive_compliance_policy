@@ -21,7 +21,11 @@ from diffusion_policy.model.vision.timm_obs_encoder_with_force import (
     TimmObsEncoderWithForce,
 )
 #CHANGE
-from diffusion_policy.model.vision.timm_obs_encoder_bi_cross import (
+from diffusion_policy.model.vision.timm_obs_encoder_bi_cross_dat_V1 import (
+    TimmObsEncoderWithForceV1,
+)
+
+from diffusion_policy.model.vision.timm_obs_encoder_bi_cross_dat_V2 import (
     TimmObsEncoderWithForceV2,
 )
 
@@ -36,7 +40,7 @@ class DiffusionUnetTimmMod1Policy(BaseImagePolicy):
         self,
         shape_meta: dict,
         noise_scheduler: DDPMScheduler,
-        obs_encoder: TimmObsEncoderWithForce, #CHANGE
+        obs_encoder: TimmObsEncoderWithForce, 
         num_inference_steps=None,
         diffusion_step_embed_dim=256,
         down_dims=(256, 512, 1024),

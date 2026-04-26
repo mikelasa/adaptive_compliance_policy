@@ -283,9 +283,7 @@ class TimmObsEncoderWithForce(ModuleAttrMixin):
                 num_heads=feature_dim // 64,
                 output_dim=feature_dim,
             )
-        logger.info(
-            "number of parameters: %e", sum(p.numel() for p in self.parameters())
-        )
+        
 
         if fuse_mode == "mlp":
             self.mlp = nn.Sequential(
@@ -310,6 +308,10 @@ class TimmObsEncoderWithForce(ModuleAttrMixin):
                 self.position_embedding = torch.nn.Parameter(
                     torch.randn(n_features, self.v_feature_dim)
                 )
+        
+        logger.info(
+            "number of parameters: %e", sum(p.numel() for p in self.parameters())
+        )
 
     def aggregate_feature(self, model_name, agg_mode, feature):
         if model_name.startswith("vit"):
