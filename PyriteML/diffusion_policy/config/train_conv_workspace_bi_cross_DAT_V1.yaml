@@ -3,10 +3,10 @@ defaults:
   # - task: vase_wiping_conv.yaml
   - task: flip_up_conv.yaml
   # - task: flip_up_conv_dinoV3.yaml
-  # - task: smiley_single_arm.yaml
+  # - task: flip_up_conv_dual_camera.yaml
   - override hydra/sweeper: optuna
 
-name: ${policy.obs_encoder.fuse_mode}_VIT_500V1_15Nfhigh_1lay_posemb
+name: ${policy.obs_encoder.fuse_mode}_VIT_500V1_20Nf_${policy.obs_encoder.force_encoder_cfg.type}
 output_dir: ${oc.env:PYRITE_CHECKPOINT_FOLDERS}
 _target_: diffusion_policy.workspace.train_diffusion_unet_image_workspace.TrainDiffusionUnetImageWorkspace
 
@@ -35,7 +35,8 @@ policy:
   obs_encoder:
     _target_: diffusion_policy.model.vision.timm_obs_encoder_bi_cross_dat_V1.TimmObsEncoderWithForceV1
     shape_meta: ${shape_meta}
-    fuse_mode: bi-cross-attention-DAT #modality-attention | bi-cross-attention |bi-cross-attention-DAT
+    fuse_mode: modality-attention #modality-attention | bi-cross-attention |bi-cross-attention-DAT | DAT
+    second_camera: True  # True: dual-camera (secondary encoder = copy of primary) | False: single-camera (original pipeline)
     reduce_pretrained_lr: True
     position_encoding: learnable #learnable | null
     symbol_retriever: positional # positional | position_relative | symbolic | relational_symbolic
@@ -44,12 +45,12 @@ policy:
       n_heads: 6       # heads for SymbolicAttention (symbolic retriever only)
       n_symbols: 16    # number of learned symbols (symbolic retriever only)
     bi_cross_heads: 4
-    n_heads_sa: 6 # self-attention heads for DAT feature aggregation
-    n_heads_ra: 6 # relational attention heads for DAT feature aggregation
+    n_heads_sa: 8 # self-attention heads for DAT feature aggregation
+    n_heads_ra: 8 # relational attention heads for DAT feature aggregation
     share_attn_params: False # whether to share attention parameters between self-attention and relational attention in the DAT encoder
-    dat_n_layers: 1  # number of stacked DualAttnEncoderBlock layers
+    dat_n_layers: 4  # number of stacked DualAttnEncoderBlock layers
     dat_dff: 2048
-    dat_activation: gelu # relu | gelu | silu
+    dat_activation: relu # relu | gelu | silu
     dat_dropout_rate: 0.0
     dat_norm_first: True
     dat_ra_kwargs: # additional kwargs for the relational attention in the DAT encoder, e.g. to control whether to use symmetric relations
@@ -77,9 +78,16 @@ policy:
       share_rgb_model: False
 
     force_encoder_cfg:
-      feature_dim: 384  
+      type: fft        # fft | cnn1d
+      feature_dim: 384  # 384 for fft, 768 for cnn1d
+      last_n_tokens: 1  # fft only: number of causal output steps to keep as tokens (default 1)
       frozen: False
       share_force_model: False
+      # ── cnn1d-only fields (ignored when type: fft) ──────────────────
+      # ft_dim: 6        # wrench input dimension
+      # norm_type: group # group | batch | layer
+      # act: gelu        # gelu | relu
+      # alpha_init: 0.01
 
   num_inference_steps: 16 # 8
   diffusion_step_embed_dim: 32
@@ -152,7 +160,7 @@ training:
 
 
 logging:
-  project: Flip_up_V1_new_k_post
+  project: Flip_up_setup_mesa_V3
   resume: False
   mode: online
   name: ${now:%Y.%m.%d-%H.%M.%S}_${task_name}_${name}
@@ -178,15 +186,16 @@ hydra:
     _target_: hydra_plugins.hydra_optuna_sweeper.optuna_sweeper.OptunaSweeper
 
     direction: minimize
-    n_trials: 4 #number of HPO trials to test
+    n_trials: 6 #number of HPO trials to test
     n_jobs: 1 #in GPU use 1
 
     sampler:
       _target_: optuna.samplers.TPESampler
       seed: 42
 
-    params:
+    params: 
       #task.dataset_path: "${oc.env:PYRITE_DATASET_FOLDERS}/flip_up_230_original,${oc.env:PYRITE_DATASET_FOLDERS}/flip_up_230"
+      policy.obs_encoder.fuse_mode: choice(modality-attention, bi-cross-attention, bi-cross-attention-DAT, DAT)
       
   job:
     override_dirname: ${name}

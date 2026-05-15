@@ -31,11 +31,11 @@ WRENCH_OFFSET_SAMPLES = 200    # same as Noffset in postprocess script
 WRENCH_MA_WINDOW = 1000        # same as wrench_moving_average_window_size
 
 
-TEST_PATH    = "/home/robotlab/data/resultados/testflipcajaDAT/flip_up_230_modality-attention_original_500_NEW_K_LABELS_15fhigh"
-COMPARE_PATH = "/home/robotlab/data/resultados/testflipcajaDAT/flip_up_230_bi-cross-attention-DAT_VIT_500V1_15Nfhigh_2lay_posemb"
+TEST_PATH    = "/home/robotlab/data/resultados/temp"
+COMPARE_PATH = "/home/robotlab/data/resultados/cajagopro"
 TRAIN_PATH = "/home/robotlab/data/real_processed/flip_up_230_500/data/episode_1770284952"
 FLAG_GROUND_TRUTH = False  # set to False to skip loading/plotting ground-truth episode
-FLAG_COMPARE = True        # set to False to skip the comparison plot
+FLAG_COMPARE = False        # set to False to skip the comparison plot
 
 
 def extract_stiffness_diag(ts_stiffnesses: np.ndarray) -> np.ndarray:

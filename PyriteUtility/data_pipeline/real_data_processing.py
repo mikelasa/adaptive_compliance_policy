@@ -36,13 +36,16 @@ def image_read(rgb_dir, rgb_file_list, i, output_data_rgb, output_data_rgb_time_
 
 
 # specify the input and output directories
+TWO_CAMERAS = False  # set True to include second camera (camera_id=1)
+
 id_list = [0]  # single robot
 # id_list = [0, 1] # bimanual
+camera_id_list = [0, 1] if TWO_CAMERAS else [0]
 
 input_dir = pathlib.Path(
-    os.environ.get("PYRITE_RAW_DATASET_FOLDERS") + "/wipe_profile"
+    os.environ.get("PYRITE_RAW_DATASET_FOLDERS") + "/flip_up_V3"
 )
-output_dir = pathlib.Path(os.environ.get("PYRITE_DATASET_FOLDERS") + "/wipe_profile_curved_170")
+output_dir = pathlib.Path(os.environ.get("PYRITE_DATASET_FOLDERS") + "/flip_up_V3_200_demos")
 
 robot_timestamp_dir = output_dir.joinpath("robot_timestamp")
 wrench_timestamp_dir = output_dir.joinpath("wrench_timestamp")
@@ -102,7 +105,7 @@ print("Reading data from input_dir: ", input_dir)
 episode_names = os.listdir(input_dir)
 
 
-def process_one_episode(root, episode_name, input_dir, id_list):
+def process_one_episode(root, episode_name, input_dir, id_list, camera_id_list):
     # ignore hidden files and stray artifacts that are not actual episodes
     if episode_name.startswith("."):
         return True
@@ -124,7 +127,7 @@ def process_one_episode(root, episode_name, input_dir, id_list):
     data_rgb = []
     data_rgb_time_stamps = []
     rgb_data_shapes = []
-    for id in id_list:
+    for id in camera_id_list:
         rgb_dir = episode_dir.joinpath("rgb_" + str(id))
         rgb_file_list = os.listdir(rgb_dir)
         rgb_file_list.sort()  # important!
@@ -192,13 +195,15 @@ def process_one_episode(root, episode_name, input_dir, id_list):
 
     # make time stamps start from zero
     time_offsets = []
-    for id in id_list:
+    for id in camera_id_list:
         time_offsets.append(data_rgb_time_stamps[id][0])
+    for id in id_list:
         time_offsets.append(data_robot_time_stamps[id][0])
         time_offsets.append(data_wrench_time_stamps[id][0])
     time_offset = np.min(time_offsets)
-    for id in id_list:
+    for id in camera_id_list:
         data_rgb_time_stamps[id] -= time_offset
+    for id in id_list:
         data_robot_time_stamps[id] -= time_offset
         data_wrench_time_stamps[id] -= time_offset
 
@@ -206,7 +211,7 @@ def process_one_episode(root, episode_name, input_dir, id_list):
     print(f"Saving everything to : {output_dir}")
     recoder_buffer = EpisodeDataBuffer(
         store_path=output_dir,
-        camera_ids=id_list,
+        camera_ids=camera_id_list,
         save_video=True,
         save_video_fps=60,
         data=root,
@@ -214,10 +219,10 @@ def process_one_episode(root, episode_name, input_dir, id_list):
 
     # save data using recoder_buffer
     rgb_data_buffer = {}
-    for id in id_list:
+    for id in camera_id_list:
         rgb_data = data_rgb[id]
         rgb_data_buffer.update({id: VideoData(rgb=rgb_data, camera_id=id)})
-    recoder_buffer.create_zarr_groups_for_episode(rgb_data_shapes, id_list, episode_id)
+    recoder_buffer.create_zarr_groups_for_episode(rgb_data_shapes, camera_id_list, episode_id)
     recoder_buffer.save_video_for_episode(
         visual_observations=rgb_data_buffer,
         visual_time_stamps=data_rgb_time_stamps,
@@ -243,6 +248,7 @@ with concurrent.futures.ProcessPoolExecutor(max_workers=3) as executor:
             episode_name,
             input_dir,
             id_list,
+            camera_id_list,
         )
         for episode_name in episode_names
     ]
@@ -252,7 +258,7 @@ with concurrent.futures.ProcessPoolExecutor(max_workers=3) as executor:
 
 """
 for episode_name in episode_names:
-    process_one_episode(root, episode_name, input_dir, id_list)
+    process_one_episode(root, episode_name, input_dir, id_list, camera_id_list)
             
 print("Finished reading. Now start generating metadata")
 from PyriteUtility.computer_vision.imagecodecs_numcodecs import register_codecs
@@ -267,6 +273,7 @@ episode_rgb_len = []
 for id in id_list:
     episode_robot_len.append([])
     episode_wrench_len.append([])
+for id in camera_id_list:
     episode_rgb_len.append([])
 
 count = 0
@@ -277,15 +284,20 @@ for key in buffer["data"].keys():
     for id in id_list:
         episode_robot_len[id].append(ep_data[f"ts_pose_fb_{id}"].shape[0])
         episode_wrench_len[id].append(ep_data[f"wrench_{id}"].shape[0])
+        print(
+            f"Number {count}: {episode}: robot id={id}: robot len: {episode_robot_len[id][-1]}, wrench_len: {episode_wrench_len[id][-1]}"
+        )
+    for id in camera_id_list:
         episode_rgb_len[id].append(ep_data[f"rgb_{id}"].shape[0])
         print(
-            f"Number {count}: {episode}: id = {id}: robot len: {episode_robot_len[id][-1]}, wrench_len: {episode_wrench_len[id][-1]} rgb len: {episode_rgb_len[id][-1]}"
+            f"Number {count}: {episode}: camera id={id}: rgb len: {episode_rgb_len[id][-1]}"
         )
     count += 1
 
 for id in id_list:
     meta[f"episode_robot{id}_len"] = zarr.array(episode_robot_len[id])
     meta[f"episode_wrench{id}_len"] = zarr.array(episode_wrench_len[id])
+for id in camera_id_list:
     meta[f"episode_rgb{id}_len"] = zarr.array(episode_rgb_len[id])
 
 print(f"All done! Generated {count} episodes in {output_dir}")

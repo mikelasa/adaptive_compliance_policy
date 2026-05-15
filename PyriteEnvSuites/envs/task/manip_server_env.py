@@ -43,6 +43,7 @@ class ManipServerEnv:
         filter_params: dict,
         query_sizes: Dict[str, int],
         compliant_dimensionality: int,
+        camera_id_list: List[int] = None,
     ) -> None:
         # manipulation server
         # pybind links to the C++ code of the manipulation server and allows using its functions in C++
@@ -63,6 +64,10 @@ class ManipServerEnv:
         else:
             id_list = [0]
 
+        # camera IDs may differ from robot IDs (e.g. single arm + two cameras)
+        if camera_id_list is None:
+            camera_id_list = id_list
+
         # set force control parameters
         # Tr: transformation matrix from force sensor frame to end-effector frame
         # n_af: number of active force control dimensions
@@ -74,9 +79,6 @@ class ManipServerEnv:
         default_stiffness = np.diag(default_stiffness)
 
         ft_filter = []
-        rgb_row_combined_buffer = []
-        rgb_buffer = []
-        output_rgb_buffer = []
         for id in id_list:
             server.set_force_controlled_axis(Tr, n_af, id)
             server.set_stiffness_matrix(default_stiffness, id)
@@ -88,34 +90,37 @@ class ManipServerEnv:
                     dim=6,
                 )
             )
-            # initialize rgb buffers
-            # (c h) (n w)->n h w c
-            # PIPELINE: Hardware → Raw Buffer → Processing Buffer → Application Buffer → Model
-            #                      (packed 2D)       (raw 4D)        (processed 4D)
-            rgb_row_combined_buffer.append(
-                np.zeros(
-                    (input_res[0] * 3, input_res[1] * query_sizes["rgb"]),
-                    dtype=np.uint8,
-                )
+
+        # initialize rgb buffers — one entry per camera ID
+        # (c h) (n w)->n h w c
+        # PIPELINE: Hardware → Raw Buffer → Processing Buffer → Application Buffer → Model
+        #                      (packed 2D)       (raw 4D)        (processed 4D)
+        n_cams = max(camera_id_list) + 1  # allocate up to highest camera ID
+        rgb_row_combined_buffer = [None] * n_cams
+        rgb_buffer = [None] * n_cams
+        output_rgb_buffer = [None] * n_cams
+        for cam_id in camera_id_list:
+            rgb_row_combined_buffer[cam_id] = np.zeros(
+                (input_res[0] * 3, input_res[1] * query_sizes["rgb"]),
+                dtype=np.uint8,
             )
-            rgb_buffer.append(
-                np.zeros((query_sizes["rgb"], *input_res, 3), dtype=np.uint8)
+            rgb_buffer[cam_id] = np.zeros(
+                (query_sizes["rgb"], *input_res, 3), dtype=np.uint8
             )
-            output_rgb_buffer.append(
-                np.zeros(
-                    (query_sizes["rgb"], camera_res_hw[0], camera_res_hw[1], 3),
-                    dtype=np.uint8,
-                )
+            output_rgb_buffer[cam_id] = np.zeros(
+                (query_sizes["rgb"], camera_res_hw[0], camera_res_hw[1], 3),
+                dtype=np.uint8,
             )
 
         self.server = server
         self.query_sizes = query_sizes
         self.id_list = id_list
+        self.camera_id_list = camera_id_list
         self.ft_filter = ft_filter
         self.rgb_row_combined_buffer = rgb_row_combined_buffer
         self.rgb_buffer = rgb_buffer
         self.output_rgb_buffer = output_rgb_buffer
-        self.rgb_timestamp_s = [np.array] * len(id_list)
+        self.rgb_timestamp_s = [None] * n_cams
         self.ts_pose_fb = [np.array] * len(id_list)
         self.ts_pose_fb_timestamp_s = [np.array] * len(id_list)
         self.wrench = [np.array] * len(id_list)
@@ -132,7 +137,7 @@ class ManipServerEnv:
 
     @property
     def camera_ids(self):
-        return self.id_list
+        return self.camera_id_list
 
     def reset(self):
         # do nothing
@@ -187,7 +192,7 @@ class ManipServerEnv:
         rgb output: (n, H, W, C)
         """
         # read data from buffer
-        for id in self.id_list:
+        for id in self.camera_id_list:
             self.rgb_row_combined_buffer[id][:] = self.server.get_camera_rgb(
                 self.query_sizes["rgb"], id
             )
@@ -212,7 +217,7 @@ class ManipServerEnv:
 
         timedebug0 = time.perf_counter()
         #  process data
-        for id in self.id_list:
+        for id in self.camera_id_list:
             # This RGB processing part takes about 60ms
             # 4D to final image
             self.rgb_buffer[id][:] = rearrange(
@@ -227,6 +232,7 @@ class ManipServerEnv:
                     self.rgb_buffer[id][i]
                 )
 
+        for id in self.id_list:
             # wrench = -wrench  # flip the sign for FT300
             self.wrench_filtered[id] = np.zeros_like(self.wrench[id])
 
@@ -242,9 +248,10 @@ class ManipServerEnv:
         #print(f"get obs: Time for processing data: {timedebug1 - timedebug0}")
 
         results = {}
-        for id in self.id_list:
+        for id in self.camera_id_list:
             results[f"rgb_{id}"] = self.output_rgb_buffer[id]
             results[f"rgb_time_stamps_{id}"] = self.rgb_timestamp_s[id]
+        for id in self.id_list:
             results[f"ts_pose_fb_{id}"] = self.ts_pose_fb[id]
             results[f"robot_time_stamps_{id}"] = self.ts_pose_fb_timestamp_s[id]
             results[f"wrench_{id}"] = self.wrench_filtered[id]

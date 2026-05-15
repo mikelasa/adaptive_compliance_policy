@@ -41,6 +41,8 @@ def raw_to_obs(
     for key, attr in shape_meta["raw"].items():
         type = attr.get("type", "low_dim")
         if type == "rgb":
+            if key not in raw_data:
+                continue  # camera not available in live env (single-camera inference with dual-camera checkpoint)
             # obs.rgb: keep as compressed zarr array in memory
             episode_data["obs"][key] = raw_data[key]
 
@@ -60,7 +62,7 @@ def raw_to_obs(
             episode_data["obs"][f"robot{id}_abs_eef_pos"] = pose9_fb[..., :3]
             episode_data["obs"][f"robot{id}_abs_eef_rot_axis_angle"] = pose9_fb[..., 3:]
 
-        # timestamps
+        # timestamps (camera 0 timestamp lives alongside its robot arm)
         episode_data["obs"][f"rgb_time_stamps_{id}"] = raw_data[
             f"rgb_time_stamps_{id}"
         ][:]
@@ -70,6 +72,14 @@ def raw_to_obs(
         episode_data["obs"][f"wrench_time_stamps_{id}"] = raw_data[
             f"wrench_time_stamps_{id}"
         ][:]
+
+    # timestamps for extra cameras that have no matching robot arm
+    robot_id_set = set(shape_meta["id_list"])
+    for cam_id in shape_meta.get("camera_id_list", []):
+        if cam_id not in robot_id_set:
+            episode_data["obs"][f"rgb_time_stamps_{cam_id}"] = raw_data[
+                f"rgb_time_stamps_{cam_id}"
+            ][:]
 
 
 def raw_to_action9(

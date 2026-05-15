@@ -6,7 +6,7 @@ defaults:
   # - task: smiley_single_arm.yaml
   - override hydra/sweeper: optuna
 
-name: ${policy.obs_encoder.fuse_mode}_DAT_${policy.obs_encoder.vision_encoder_cfg.model_name}_1000
+name: ${policy.obs_encoder.fuse_mode}_VIT_500V1_NEW_K_LABELS_15Nfhigh
 output_dir: ${oc.env:PYRITE_CHECKPOINT_FOLDERS}
 _target_: diffusion_policy.workspace.train_diffusion_unet_image_workspace.TrainDiffusionUnetImageWorkspace
 
@@ -18,14 +18,12 @@ policy:
   _target_: diffusion_policy.policy.diffusion_unet_timm_mod1_policy.DiffusionUnetTimmMod1Policy
 
   shape_meta: ${shape_meta}
-  
+
   noise_scheduler:
     _target_: diffusers.DDIMScheduler
     num_train_timesteps: 50
     beta_start: 0.0001
     beta_end: 0.02
-    # beta_schedule is important
-    # this is the best we found
     beta_schedule: squaredcos_cap_v2
     clip_sample: True
     set_alpha_to_one: True
@@ -35,33 +33,33 @@ policy:
   obs_encoder:
     _target_: diffusion_policy.model.vision.timm_obs_encoder_bi_cross_dat_V2.TimmObsEncoderWithForceV2
     shape_meta: ${shape_meta}
-    fuse_mode: modality-attention #modality-attention | bi-cross-attention
+    fuse_mode: bi-cross-attention-ViDAT  # modality-attention | bi-cross-attention | bi-cross-attention-ViDAT
     reduce_pretrained_lr: True
-    position_encoding: null #learnable | null
-    use_relational_features: false
-    symbol_retriever: positional # positional | position_relative | symbolic | relational_symbolic
+    position_encoding: learnable  # learnable | null
+    symbol_retriever: position_relative  # positional | position_relative | symbolic | relational_symbolic
     symbol_retriever_cfg:
-      symbol_dim: 768  # must match v_feature_dim (d_model of DAT encoder)
+      symbol_dim: 768  # must match v_feature_dim (d_model of ViDAT)
+      max_rel_pos: 50  # vit_base_patch32: 7x7=49 patches + 1 CLS = 50 tokens per frame
     bi_cross_heads: 4
-    n_heads_sa: 6 # self-attention heads for DAT feature aggregation
-    n_heads_ra: 6 # relational attention heads for DAT feature aggregation
-    share_attn_params: True # whether to share attention parameters between self-attention and relational attention in the DAT encoder
+    n_heads_sa: 4  # sensory attention heads per ViDAT layer (even split recommended)
+    n_heads_ra: 4  # relational attention heads per ViDAT layer (even split recommended)
+    share_attn_params: False
+    vidat_n_layers: 2  # ViDAT layers on patch tokens before fusion (paper recommends 2–3)
     dat_dff: 2048
-    dat_activation: gelu # relu | gelu | silu
+    dat_activation: gelu  # relu | gelu | silu
     dat_dropout_rate: 0.0
     dat_norm_first: True
-    n_vidat_layers: 2 # number of stacked ViDAT layers applied to patch tokens before fusion
-    dat_ra_kwargs: # additional kwargs for the relational attention in the DAT encoder, e.g. to control whether to use symmetric relations
-      symmetric_rels: True # enable relations, default False
+    dat_ra_kwargs:
+      symmetric_rels: True  # symmetric relations recommended as starting point (ablate asymmetric)
 
     vision_encoder_cfg:
-      model_name: 'vit_base_patch32_clip_224.openai' # 'vit_base_patch16_dinov3.lvd1689m' # orignal: 'vit_base_patch32_clip_224.openai'
+      model_name: 'vit_base_patch32_clip_224.openai'
       pretrained: True
-      frozen: False
+      frozen: True  # backbone frozen; only ViDAT layers train from scratch
       global_pool: ''
 
       # downsample ratio for image tokens
-      downsample_ratio: 32 # 16 for dinov3 | 32 for vit
+      downsample_ratio: 32  # 16 for dinov3 | 32 for vit_base_patch32
 
       transforms:
         - type: RandomCrop
@@ -76,19 +74,23 @@ policy:
       share_rgb_model: False
 
     force_encoder_cfg:
-      feature_dim: 384  
+      type: fft      # fft | cnn1d
+      feature_dim: 384  # fft: z_dim (output = 2*feature_dim = 768) | cnn1d: hidden_channels (output = feature_dim)
       frozen: False
       share_force_model: False
+      # ── cnn1d-only fields (ignored when type: fft) ──────────────────
+      # ft_dim: 6        # wrench input dimension
+      # norm_type: group # group | batch | layer
+      # act: gelu        # gelu | relu
+      # alpha_init: 0.01
 
-  num_inference_steps: 16 # 8
+  num_inference_steps: 16
   diffusion_step_embed_dim: 32
   down_dims: [256,512,1024]
   kernel_size: 5
   n_groups: 8
   cond_predict_scale: True
-  input_pertub: 0.0684854455525527 # reference: https://github.com/forever208/DDPM-IP
-  # train multiple diffusion steps per obs encoder forward pass
-  # doing this too much will cause instability!
+  input_pertub: 0.0684854455525527
   train_diffusion_n_samples: 1
 
 ema:
@@ -101,14 +103,14 @@ ema:
 
 dataloader:
   batch_size: 128
-  num_workers: 24 #32 falla por memoria
+  num_workers: 32
   shuffle: True
   pin_memory: True
   persistent_workers: false
 
 val_dataloader:
   batch_size: 128
-  num_workers: 24
+  num_workers: 32
   shuffle: False
   pin_memory: True
   persistent_workers: false
@@ -125,33 +127,26 @@ training:
   seed: 42
   debug: False
   resume: False
-  # optimization
   lr_scheduler: cosine
   lr_warmup_steps: 1000
   num_epochs: 150
-  
+
   log_gradient_norm: False
 
   gradient_accumulate_every: 1
-  # EMA destroys performance when used with BatchNorm
-  # replace BatchNorm with GroupNorm.
   use_ema: True
   freeze_encoder: False
-  # training loop control
-  # in epochs
   rollout_every: 10
   checkpoint_every: 10
   val_every: 5
-  sample_every: 5 #validation sampling
-  # steps per epoch
+  sample_every: 5
   max_train_steps: null
   max_val_steps: null
-  # misc
   tqdm_interval_sec: 1.0
 
 
 logging:
-  project: biCross_DAT
+  project: Flip_up_V1_new_k_post
   resume: False
   mode: online
   name: ${now:%Y.%m.%d-%H.%M.%S}_${task_name}_${name}
@@ -177,8 +172,8 @@ hydra:
     _target_: hydra_plugins.hydra_optuna_sweeper.optuna_sweeper.OptunaSweeper
 
     direction: minimize
-    n_trials: 4 #number of HPO trials to test
-    n_jobs: 1 #in GPU use 1
+    n_trials: 4
+    n_jobs: 1
 
     sampler:
       _target_: optuna.samplers.TPESampler
@@ -186,7 +181,7 @@ hydra:
 
     params:
       #task.dataset_path: "${oc.env:PYRITE_DATASET_FOLDERS}/flip_up_230_original,${oc.env:PYRITE_DATASET_FOLDERS}/flip_up_230"
-      
+
   job:
     override_dirname: ${name}
   run:
@@ -194,5 +189,3 @@ hydra:
   sweep:
     dir: ${output_dir}/${now:%Y.%m.%d}_${now:%H.%M.%S}_${task_name}_${name}
     subdir: ${hydra.job.num}
-
-  

@@ -12,6 +12,7 @@ import time
 import matplotlib.pyplot as plt
 import zarr
 import spatialmath as sm
+from collections import deque
 
 
 from PyriteEnvSuites.envs.task.manip_server_env import ManipServerEnv
@@ -52,7 +53,7 @@ def main():
     pipeline_para = {
         "save_low_dim_every_N_frame": 1,
         "save_visual_every_N_frame": 1,
-        "ckpt_path": "/2026.04.23_17.28.25_flip_up_230_bi-cross-attention-DAT_VIT_500V1_15Nfhigh_2lay_posemb/checkpoints/latest.ckpt",
+        "ckpt_path": "/2026.05.14_20.11.51_flip_up_V3_200_bi-cross-attention_VIT_500V1_20Nf_fft/checkpoints/latest.ckpt",
         # "hardware_config_path": hardware_config_folder_path + "/manip_server_config_left_arm.yaml",
         "hardware_config_path": hardware_config_folder_path
         + "/single_arm_data_collection_franka.yaml",
@@ -130,6 +131,9 @@ def main():
         "wrench": wrench_query_size,
     }
 
+    # camera IDs from checkpoint shape_meta (may differ from robot id_list)
+    env_camera_id_list = shape_meta.get("camera_id_list", None)
+
     # create the env
     # Manip server makes the communication with the real hardware posible through manip server
     # and pybind11
@@ -139,6 +143,7 @@ def main():
         filter_params=force_filtering_para,
         query_sizes=query_sizes,
         compliant_dimensionality=3,
+        camera_id_list=env_camera_id_list,
     )
 
     env.reset()
@@ -187,6 +192,10 @@ def main():
     else:
         raise RuntimeError("unsupported")
 
+    camera_id_list = shape_meta.get("camera_id_list", id_list)
+    image_height = 480
+    image_width = 640
+
     printOrNot(vbs_h2, "Creating MPC.")
     # create MPC controller: combines policy with interpolation
     controller = ModelPredictiveControllerHybrid(
@@ -214,17 +223,43 @@ def main():
         plt.ion()  # Enable interactive mode
         fig = plt.figure(figsize=(10, 8))
         ax = fig.add_subplot(111, projection='3d')
-        
+
         # Don't plot dummy data or call plt.show() here
         # Just set up the axes
         ax.set_xlabel("X")
         ax.set_ylabel("Y")
         ax.set_zlabel("Z")
         ax.set_title("Trajectory Visualization")
-        
+
         # Show non-blocking
         plt.show(block=False)
         plt.pause(0.001)
+
+    # real-time force norm plot (~10s rolling window at ~5Hz update rate)
+    _force_window = 50
+    _force_norm_history = deque(maxlen=_force_window)
+    _torque_norm_history = deque(maxlen=_force_window)
+    plt.ion()
+    _fig_f, (_ax_f, _ax_t) = plt.subplots(2, 1, figsize=(8, 4), tight_layout=True)
+    _ax_f.set_title("||Force|| [N]")
+    _ax_f.set_ylim(0, 40)
+    _ax_t.set_title("||Torque|| [Nm]")
+    _ax_t.set_ylim(0, 8)
+    (_line_f,) = _ax_f.plot([], [], color="tab:blue")
+    (_line_t,) = _ax_t.plot([], [], color="tab:orange")
+    plt.show(block=False)
+    plt.pause(0.001)
+
+    def _update_force_plot(wrench_6d):
+        _force_norm_history.append(np.linalg.norm(wrench_6d[:3]))
+        _torque_norm_history.append(np.linalg.norm(wrench_6d[3:]))
+        xs_f = np.arange(len(_force_norm_history))
+        xs_t = np.arange(len(_torque_norm_history))
+        _line_f.set_data(xs_f, list(_force_norm_history))
+        _line_t.set_data(xs_t, list(_torque_norm_history))
+        _ax_f.set_xlim(0, max(_force_window, len(_force_norm_history)))
+        _ax_t.set_xlim(0, max(_force_window, len(_torque_norm_history)))
+        _fig_f.canvas.flush_events()
 
     # log
     log_store = zarr.DirectoryStore(path=pipeline_para["control_log_path"])
@@ -239,11 +274,10 @@ def main():
         obs_raw = env.get_observation_from_buffer()
 
         # plot the rgb image
-        if len(id_list) == 1:
-            rgb = obs_raw["rgb_0"][-1]
-        else:
-            rgb = np.vstack([obs_raw[f"rgb_{i}"][-1] for i in id_list])
-        bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+        frames = [cv2.resize(cv2.cvtColor(obs_raw[f"rgb_{cam_id}"][-1], cv2.COLOR_RGB2BGR),
+                             (image_width, image_height))
+                  for cam_id in camera_id_list if f"rgb_{cam_id}" in obs_raw]
+        bgr = np.vstack(frames) if len(frames) > 1 else frames[0]
         cv2.imshow("image", bgr)
         key = cv2.waitKey(10)
         if key == ord("q"):
@@ -271,13 +305,15 @@ def main():
             obs_raw = env.get_observation_from_buffer()
 
             # plot the rgb image
-            if len(id_list) == 1:
-                rgb = obs_raw["rgb_0"][-1]
-            else:
-                rgb = np.vstack([obs_raw[f"rgb_{i}"][-1] for i in id_list])
-            bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+            frames = [cv2.resize(cv2.cvtColor(obs_raw[f"rgb_{cam_id}"][-1], cv2.COLOR_RGB2BGR),
+                                 (image_width, image_height))
+                      for cam_id in camera_id_list if f"rgb_{cam_id}" in obs_raw]
+            bgr = np.vstack(frames) if len(frames) > 1 else frames[0]
             cv2.imshow("image", bgr)
             cv2.waitKey(10)
+
+            # update force plot with latest filtered wrench (robot 0)
+            _update_force_plot(obs_raw["wrench_0"][-1])
 
             # save low dim obs named as raw in new dict called obs_task
             # function change format and names of obs

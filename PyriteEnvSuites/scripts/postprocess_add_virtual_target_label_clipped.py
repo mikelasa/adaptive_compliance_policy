@@ -26,7 +26,7 @@ if "PYRITE_DATASET_FOLDERS" not in os.environ:
 dataset_folder_path = os.environ.get("PYRITE_DATASET_FOLDERS")
 
 # Config for flip up (single robot)
-dataset_path = dataset_folder_path + "/flip_up_230_500_20N"
+dataset_path = dataset_folder_path + "/flip_upV2_230_demos_two_cameras"
 id_list = [0]
 
 # # Config for vase wiping (bimanual)
@@ -36,14 +36,14 @@ id_list = [0]
 wrench_moving_average_window_size = 1000  # should be around 1s of data
 buffer = zarr.open(dataset_path, mode="r+")
 
-num_of_process = 32
-flag_plot = False
+num_of_process = 1
+flag_plot = True
 fin_every_n = 50
 
 stiffness_estimation_para = {
     "k_max": 2000,
-    "k_min": 500,
-    "f_low": 7.5,
+    "k_min": 200,
+    "f_low": 10,
     "f_high": 20,
     "max_disp": 0.04,  #  k_min * 0.04 = 20N max
     "dim": 3,
