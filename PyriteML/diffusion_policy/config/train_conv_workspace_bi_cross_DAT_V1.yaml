@@ -1,12 +1,12 @@
 defaults:
   - _self_
   # - task: vase_wiping_conv.yaml
-  - task: flip_up_conv.yaml
+  # - task: flip_up_conv.yaml
   # - task: flip_up_conv_dinoV3.yaml
-  # - task: flip_up_conv_dual_camera.yaml
+  - task: flip_up_conv_dual_camera.yaml
   - override hydra/sweeper: optuna
 
-name: ${policy.obs_encoder.fuse_mode}_VIT_500V1_20Nf_${policy.obs_encoder.force_encoder_cfg.type}
+name: ${policy.obs_encoder.fuse_mode}_VIT_DCAM_400V3_16Nf_${policy.obs_encoder.force_encoder_cfg.type}_clipped
 output_dir: ${oc.env:PYRITE_CHECKPOINT_FOLDERS}
 _target_: diffusion_policy.workspace.train_diffusion_unet_image_workspace.TrainDiffusionUnetImageWorkspace
 
@@ -109,14 +109,14 @@ ema:
   max_value: 0.9999
 
 dataloader:
-  batch_size: 128
+  batch_size: 64
   num_workers: 32 #32 falla por memoria
   shuffle: True
   pin_memory: True
   persistent_workers: false
 
 val_dataloader:
-  batch_size: 128
+  batch_size: 64
   num_workers: 32
   shuffle: False
   pin_memory: True
@@ -141,7 +141,7 @@ training:
   
   log_gradient_norm: False
 
-  gradient_accumulate_every: 1
+  gradient_accumulate_every: 2
   # EMA destroys performance when used with BatchNorm
   # replace BatchNorm with GroupNorm.
   use_ema: True
@@ -186,7 +186,7 @@ hydra:
     _target_: hydra_plugins.hydra_optuna_sweeper.optuna_sweeper.OptunaSweeper
 
     direction: minimize
-    n_trials: 6 #number of HPO trials to test
+    n_trials: 2 #number of HPO trials to test
     n_jobs: 1 #in GPU use 1
 
     sampler:
@@ -195,7 +195,8 @@ hydra:
 
     params: 
       #task.dataset_path: "${oc.env:PYRITE_DATASET_FOLDERS}/flip_up_230_original,${oc.env:PYRITE_DATASET_FOLDERS}/flip_up_230"
-      policy.obs_encoder.fuse_mode: choice(modality-attention, bi-cross-attention, bi-cross-attention-DAT, DAT)
+      #policy.obs_encoder.fuse_mode: choice(modality-attention, bi-cross-attention, bi-cross-attention-DAT, DAT)
+      policy.obs_encoder.fuse_mode: choice(modality-attention, bi-cross-attention-DAT)
       
   job:
     override_dirname: ${name}

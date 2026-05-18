@@ -31,8 +31,8 @@ WRENCH_OFFSET_SAMPLES = 200    # same as Noffset in postprocess script
 WRENCH_MA_WINDOW = 1000        # same as wrench_moving_average_window_size
 
 
-TEST_PATH    = "/home/robotlab/data/resultados/temp"
-COMPARE_PATH = "/home/robotlab/data/resultados/cajagopro"
+TEST_PATH    = "/home/robotlab/data/resultados-tests/seen/caja2"
+COMPARE_PATH = "/home/robotlab/data/resultados/self-clipped-400-15N-1"
 TRAIN_PATH = "/home/robotlab/data/real_processed/flip_up_230_500/data/episode_1770284952"
 FLAG_GROUND_TRUTH = False  # set to False to skip loading/plotting ground-truth episode
 FLAG_COMPARE = False        # set to False to skip the comparison plot

@@ -320,12 +320,16 @@ class LinearTransformationInterpolator(AbstractGeometricPath):
         id0 = id1 - 1
         x = (path_positions - self.x_wp[id0]) / (self.x_wp[id1] - self.x_wp[id0])
 
-        # clamp to [0, 1) to avoid spatialmath interp returning None at s=1.0
-        x = np.clip(x, 0.0, 1.0 - 1e-9)
+        x = np.clip(x, 0.0, 1.0)
 
         return np.array(
             [
-                self.transform_wp[id0[i]].interp(self.transform_wp[id1[i]], x[i]).data[0]
+                smb.trinterp(
+                    start=self.transform_wp[id0[i]].A,
+                    end=self.transform_wp[id1[i]].A,
+                    s=float(x[i]),
+                    shortest=True,
+                )
                 for i in range(len(id0))
             ]
         )

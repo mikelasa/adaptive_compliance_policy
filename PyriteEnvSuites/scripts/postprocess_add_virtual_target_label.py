@@ -4,6 +4,7 @@ import sys
 import os
 import matplotlib.pyplot as plt
 from tqdm import tqdm
+from scipy.signal import butter, sosfiltfilt
 
 SCRIPT_PATH = os.path.abspath(os.path.dirname(__file__))
 sys.path.append(os.path.join(SCRIPT_PATH, "../../"))
@@ -33,7 +34,10 @@ id_list = [0]
 # dataset_path = dataset_folder_path + "/vase_wiping_v6.3/"
 # id_list = [0, 1]
 
-wrench_moving_average_window_size = 1000  # should be around 1s of data
+# Butterworth low-pass filter matching inference-time force_filtering_para
+wrench_filter_cutoff_hz = 5.0
+wrench_filter_order = 5
+wrench_filter_fs = 1000.0
 buffer = zarr.open(dataset_path, mode="r+")
 
 num_of_process = 32
@@ -82,17 +86,12 @@ def process_episode(ep, ep_data, id_list):
         # for i in range(6):
         #     wrench[:, i] = -wrench[:, i]
 
-        # filter wrench using moving average
-        N = wrench_moving_average_window_size
-        print("Computing moving average")
-        # fmt: off
-        wrench_moving_average[:, 0] = np.convolve(wrench[:, 0], np.ones(N) / N, mode="same")
-        wrench_moving_average[:, 1] = np.convolve(wrench[:, 1], np.ones(N) / N, mode="same")
-        wrench_moving_average[:, 2] = np.convolve(wrench[:, 2], np.ones(N) / N, mode="same")
-        wrench_moving_average[:, 3] = np.convolve(wrench[:, 3], np.ones(N) / N, mode="same")
-        wrench_moving_average[:, 4] = np.convolve(wrench[:, 4], np.ones(N) / N, mode="same")
-        wrench_moving_average[:, 5] = np.convolve(wrench[:, 5], np.ones(N) / N, mode="same")
-        # fmt: on
+        # filter wrench using zero-phase Butterworth (matches inference-time filter params)
+        print("Computing Butterworth filter")
+        sos = butter(wrench_filter_order, wrench_filter_cutoff_hz,
+                     fs=wrench_filter_fs, btype="low", output="sos")
+        for i in range(6):
+            wrench_moving_average[:, i] = sosfiltfilt(sos, wrench[:, i])
         wrench_time_stamps = ep_data[f"wrench_time_stamps_{id}"]
         robot_time_stamps = ep_data[f"robot_time_stamps_{id}"]
 
@@ -166,13 +165,10 @@ def process_episode(ep, ep_data, id_list):
     if flag_plot:
             print("Plotting...")
             plt.ion()  # to run GUI event loop
-            fig = plt.figure()
-            ax = plt.axes(projection="3d")
-            x = np.linspace(-0.02, 0.2, 20)
-            y = np.linspace(-0.1, 0.1, 20)
-            z = np.linspace(-0.1, 0.1, 20)
-            ax.plot3D(x, y, z, color="blue", marker="o", markersize=3)
-            ax.plot3D(x, y, z, color="red", marker="o", markersize=3)
+            fig = plt.figure(figsize=(14, 6))
+            ax = fig.add_subplot(121, projection="3d")
+            ax_k = fig.add_subplot(122)
+
             ax.set_title("Target and virtual target")
             ax.set_xlabel("X")
             ax.set_ylabel("Y")
@@ -244,6 +240,19 @@ def process_episode(ep, ep_data, id_list):
 
             set_axes_equal(ax)
 
+            # stiffness over time
+            ax_k.cla()
+            t_axis = np.arange(num_robot_time_steps)
+            ax_k.plot(t_axis, stiffness, color="purple", linewidth=1.5, label="stiffness k")
+            ax_k.axhline(stiffness_estimation_para["k_min"], color="red",   linestyle="--", linewidth=1, label=f"k_min={stiffness_estimation_para['k_min']}")
+            ax_k.axhline(stiffness_estimation_para["k_max"], color="green", linestyle="--", linewidth=1, label=f"k_max={stiffness_estimation_para['k_max']}")
+            ax_k.set_xlabel("timestep")
+            ax_k.set_ylabel("k [N/m]")
+            ax_k.set_title(f"Stiffness — episode {ep}")
+            ax_k.set_ylim(stiffness_estimation_para["k_min"] - 100, stiffness_estimation_para["k_max"] + 100)
+            ax_k.legend()
+
+            plt.tight_layout()
             plt.draw()
             input("Press Enter to continue...")
     
