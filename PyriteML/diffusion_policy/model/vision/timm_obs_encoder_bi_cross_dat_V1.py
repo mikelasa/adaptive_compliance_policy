@@ -10,6 +10,11 @@ from diffusion_policy.model.common.module_attr_mixin import ModuleAttrMixin
 from diffusion_policy.common.pytorch_util import replace_submodules
 from diffusion_policy.model.vision.utils.cross_attention import CrossAttention
 from diffusion_policy.model.vision.utils.attention_pool import AttentionPool1d
+from diffusion_policy.model.vision.utils.attention_viz import (
+    VizTransformerEncoderLayer,
+    VizCrossAttention,
+    VizAttentionPool1d,
+)
 
 from multimodal_representation.multimodal.models.base_models.encoders import (
     ForceEncoder,
@@ -210,9 +215,14 @@ class TimmObsEncoderWithForceV1(ModuleAttrMixin):
 
         # ── fuse-mode specific modules ────────────────────────────────────────
         if fuse_mode == "modality-attention":
-            # 1 CLS token per frame + 1 token per wrench key
+            assert force_encoder_type != "cnn1d", (
+                "fuse_mode='modality-attention' is incompatible with force_encoder_cfg.type='cnn1d': "
+                "cnn1d produces wrench_horizon tokens per wrench key, but modality-attention expects "
+                "exactly 1 token per wrench key. Use fft encoder or switch to a bi-cross/DAT fuse_mode."
+            )
+            # 1 CLS token per frame + 1 token per wrench key (fft only)
             n_features = len(rgb_keys) * rgb_horizon + len(wrench_keys)
-            self.transformer_encoder = torch.nn.TransformerEncoderLayer(
+            self.transformer_encoder = VizTransformerEncoderLayer(
                 d_model=self.v_feature_dim,
                 nhead=8,
                 dim_feedforward=2048,
@@ -255,13 +265,13 @@ class TimmObsEncoderWithForceV1(ModuleAttrMixin):
                 n_force_tokens = len(wrench_keys) * fft_last_n_tokens
             total_tokens = len(rgb_keys) * rgb_horizon * tokens_per_frame + n_force_tokens
             if self.fuse_mode in ("bi-cross-attention", "bi-cross-attention-DAT"):
-                self.img_cross_attention = CrossAttention(
+                self.img_cross_attention = VizCrossAttention(
                     model_dim=self.v_feature_dim, num_heads=self.bi_cross_heads
                 )
-                self.force_cross_attention = CrossAttention(
+                self.force_cross_attention = VizCrossAttention(
                     model_dim=self.v_feature_dim, num_heads=self.bi_cross_heads
                 )
-            self.attn_pool = AttentionPool1d(
+            self.attn_pool = VizAttentionPool1d(
                 seq_len=total_tokens,
                 embed_dim=self.v_feature_dim,
                 num_heads=self.v_feature_dim // 64,
@@ -396,6 +406,15 @@ class TimmObsEncoderWithForceV1(ModuleAttrMixin):
                     self.position_embedding = self.position_embedding.to(in_embeds.device)
                 in_embeds = in_embeds + self.position_embedding
             out_embeds = self.transformer_encoder(in_embeds)         # (B, n_features, D)
+
+            # attention visualization (inference only; no-op when disabled)
+            if hasattr(self.transformer_encoder, "last_attn_weights"):
+                self._dump_modality_attention(
+                    self.transformer_encoder.last_attn_weights,
+                    n_img=rgb_tokens.shape[1],
+                )
+                del self.transformer_encoder.last_attn_weights
+
             result = self.linear_projection(out_embeds.reshape(B, -1))  # (B, D)
 
         elif self.fuse_mode == "bi-cross-attention":
@@ -419,6 +438,19 @@ class TimmObsEncoderWithForceV1(ModuleAttrMixin):
                 fused   = layer(fused, symbols)                         # (B, total_tokens, D)
             result = self.attn_pool(fused)                              # (B, D)
 
+            # attention visualization (inference only; no-op when disabled)
+            if hasattr(self.attn_pool, "last_attn_weights"):
+                cross_w = getattr(self.img_cross_attention, "last_attn_weights", None)
+                self._dump_bidat_attention(
+                    self.attn_pool.last_attn_weights,
+                    cross_w,
+                    n_img=rgb_tokens.shape[1],
+                    n_force=force_tokens.shape[1],
+                )
+                del self.attn_pool.last_attn_weights
+                if cross_w is not None:
+                    del self.img_cross_attention.last_attn_weights
+
         elif self.fuse_mode == "DAT":
             force_tokens = torch.cat(force_features, dim=1)          # (B, n_wrench, D)
 
@@ -432,6 +464,70 @@ class TimmObsEncoderWithForceV1(ModuleAttrMixin):
             result = torch.cat([result, torch.cat(low_dim_features, dim=-1)], dim=-1)
 
         return result
+
+    def _dump_modality_attention(self, weights, n_img):
+        """Split the captured self-attention weights into image vs force mass
+        and pickle one snapshot per call. Called only when capture is enabled.
+
+        weights: (B, L, L) averaged over heads. Token order along the key axis is
+        [image CLS tokens (n_img), force tokens (rest)].
+        """
+        import os
+        import pickle
+
+        # average over batch and over query tokens → (L,) attention received per key
+        W = weights.float().mean(dim=(0, 1))
+        attn_dict = {
+            "img_obs": W[:n_img].sum().item(),
+            "force_obs": W[n_img:].sum().item(),
+            "per_key": W.cpu().numpy(),
+            "n_img": int(n_img),
+        }
+        if not hasattr(self, "_attn_viz_count"):
+            self._attn_viz_count = 0
+        out_dir = getattr(self, "attn_viz_dir", "attn_viz")
+        os.makedirs(out_dir, exist_ok=True)
+        with open(os.path.join(out_dir, f"attn_weights_{self._attn_viz_count}.pkl"), "wb") as f:
+            pickle.dump(attn_dict, f)
+        self._attn_viz_count += 1
+
+    def _dump_bidat_attention(self, pool_weights, cross_weights, n_img, n_force):
+        """Pickle one attention snapshot per call for bi-cross-attention-DAT.
+
+        pool_weights:  (B, 1, n_img+n_force+1) — attn-pool query over all tokens.
+                       Index 0 is the prepended mean token; image tokens follow,
+                       then force tokens: [mean, img_0..img_{n-1}, force_0..force_{m-1}]
+        cross_weights: (B, n_img, n_force) — img←force cross-attention, averaged over heads.
+                       None if capture was off for that module.
+        """
+        import os
+        import pickle
+
+        W_pool = pool_weights[0, 0].float().cpu().numpy()  # (n_img+n_force+1,)
+        img_mass   = float(W_pool[1:1 + n_img].sum())
+        force_mass = float(W_pool[1 + n_img:].sum())
+
+        attn_dict = {
+            "img_obs":        img_mass,
+            "force_obs":      force_mass,
+            "pool_per_token": W_pool,       # full pool weight vector for detailed plots
+            "n_img":          int(n_img),
+            "n_force":        int(n_force),
+            "mode":           "bi-cross-attention-DAT",
+        }
+        if cross_weights is not None:
+            # average over image queries → (n_force,): which force timesteps matter most
+            attn_dict["cross_per_force_step"] = (
+                cross_weights[0].float().cpu().numpy().mean(axis=0)
+            )
+
+        if not hasattr(self, "_attn_viz_count"):
+            self._attn_viz_count = 0
+        out_dir = getattr(self, "attn_viz_dir", "attn_viz")
+        os.makedirs(out_dir, exist_ok=True)
+        with open(os.path.join(out_dir, f"attn_weights_{self._attn_viz_count}.pkl"), "wb") as f:
+            pickle.dump(attn_dict, f)
+        self._attn_viz_count += 1
 
     @torch.no_grad()
     def output_shape(self):

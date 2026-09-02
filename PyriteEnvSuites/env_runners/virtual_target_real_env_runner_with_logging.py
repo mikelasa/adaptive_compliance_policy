@@ -53,8 +53,8 @@ def main():
     pipeline_para = {
         "save_low_dim_every_N_frame": 1,
         "save_visual_every_N_frame": 1,
-        "ckpt_path": "/2026.05.16_13.48.24_flip_up_V2_230_DCAM_bi-cross-attention-DAT_VIT_DCAM_400V3_16Nf_fft_clipped/checkpoints/latest.ckpt",
-        # "hardware_config_path": hardware_config_folder_path + "/manip_server_config_left_arm.yaml",
+        "ckpt_path": "/2026.09.01_17.40.35_flip_up_200_demos_clip_modality-attention_VIT_500k_17f_fft/checkpoints/latest.ckpt",
+        # "hardware_config_path": hardware_config_folder_path + "/manip_server_config_left_arm.yaml", episode_1778754577
         "hardware_config_path": hardware_config_folder_path
         + "/single_arm_data_collection_franka.yaml",
         "control_log_path": control_log_folder_path + "/temp/",
@@ -502,6 +502,9 @@ def main():
                 )
                 horizon_log.create_dataset(
                     f"ts_stiffnesses_{id}", data=outputs_ts_stiffnesses[id]
+                )
+                horizon_log.create_dataset(
+                    f"stiffness_scalars_{id}", data=action_stiffnesses[id]
                 )
             horizon_log.create_dataset(
                 "timestamps_s", data=timestamps + action_start_time_s

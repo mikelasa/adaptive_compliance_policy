@@ -29,13 +29,17 @@ WRENCH_UNITS = ["N", "N", "N", "Nm", "Nm", "Nm"]
 FIN_EVERY_N = 5  # draw connecting lines every N steps
 WRENCH_OFFSET_SAMPLES = 200    # same as Noffset in postprocess script
 WRENCH_MA_WINDOW = 1000        # same as wrench_moving_average_window_size
+SPARSE_EXECUTION_HORIZON = 12  # executed steps per horizon (control_para["sparse_execution_horizon"])
 
 
-TEST_PATH    = "/home/robotlab/data/resultados-tests/seen/caja2"
-COMPARE_PATH = "/home/robotlab/data/resultados/self-clipped-400-15N-1"
-TRAIN_PATH = "/home/robotlab/data/real_processed/flip_up_230_500/data/episode_1770284952"
-FLAG_GROUND_TRUTH = False  # set to False to skip loading/plotting ground-truth episode
-FLAG_COMPARE = False        # set to False to skip the comparison plot
+TEST_PATH    = "/home/robotlab/data/resultados-tests/singleCamera/preprocesado35f/ACP/caja11"
+#TEST_PATH    = "/home/robotlab/data/resultados-tests/temp"
+COMPARE_PATH = "/home/robotlab/data/resultados-tests/singleCamera/preprocesado35f/bicrossDAT/caja11"
+TRAIN_PATH = "/home/robotlab/data/real_processed/V3/flip_up_V3_distractors_500K_30F_0045c/data/episode_1778746728"
+# caja1: episode_1778746728
+# caja2: episode_1778749386
+FLAG_GROUND_TRUTH = True      # set to False to skip loading/plotting ground-truth episode
+FLAG_COMPARE = True        # set to False to skip the comparison plot episode_1778754577 episode_1778746728
 
 
 def extract_stiffness_diag(ts_stiffnesses: np.ndarray) -> np.ndarray:
@@ -135,17 +139,20 @@ def process_wrench(wrench: np.ndarray,
 
 def load_episode(episode_path: str, robot_id: int = 0):
     """
-    Load ground-truth stiffness and poses from a processed demonstration episode.
+    Load ground-truth stiffness, poses, and wrench from a processed demonstration episode.
 
     Args:
         episode_path: path to the zarr episode directory
         robot_id:     robot index (matches the _{id} suffix in the zarr keys)
 
     Returns:
-        timestamps:  (N,)   wall-clock timestamps normalized to 0
-        stiffness:   (N,)   scalar stiffness estimated by VirtualTargetEstimator
-        nominal_pos: (N, 3) robot end-effector XYZ (ts_pose_fb)
-        virtual_pos: (N, 3) virtual target XYZ (ts_pose_virtual_target)
+        timestamps:    (N,)   wall-clock timestamps normalized to 0
+        stiffness:     (N,)   scalar stiffness estimated by VirtualTargetEstimator
+        nominal_pos:   (N, 3) robot end-effector XYZ (ts_pose_fb)
+        virtual_pos:   (N, 3) virtual target XYZ (ts_pose_virtual_target)
+        wrench_ts:     (M,)   wrench timestamps in seconds, normalized to 0
+        wrench_raw:    (M, 6) raw wrench [Fx Fy Fz Tx Ty Tz]
+        wrench_filt:   (M, 6) filtered wrench (same preprocessing as postprocess script)
     """
     ep = zarr.open(episode_path, mode="r")
     timestamps = ep[f"robot_time_stamps_{robot_id}"][:]
@@ -153,7 +160,52 @@ def load_episode(episode_path: str, robot_id: int = 0):
     stiffness = ep[f"stiffness_{robot_id}"][:]
     nominal_pos = ep[f"ts_pose_fb_{robot_id}"][:, :3]
     virtual_pos = ep[f"ts_pose_virtual_target_{robot_id}"][:, :3]
-    return timestamps, stiffness, nominal_pos, virtual_pos
+    wrench_ts = ep[f"wrench_time_stamps_{robot_id}"][:]
+    wrench_ts = (wrench_ts - wrench_ts[0]) / 1000.0   # ms → s, normalized to 0
+    wrench_raw = ep[f"wrench_{robot_id}"][:]
+    wrench_filt = ep[f"wrench_filtered_{robot_id}"][:]
+    return timestamps, stiffness, nominal_pos, virtual_pos, wrench_ts, wrench_raw, wrench_filt
+
+
+def load_stiffness_sequences(dataset_path: str):
+    """
+    Load full per-step stiffness diagonal for every horizon.
+
+    Returns:
+        sequences: list of (6, N_steps) arrays, one entry per horizon.
+    """
+    buffer = zarr.open(dataset_path, mode="r")
+    horizon_keys = sorted(buffer.keys(), key=lambda k: int(k.split("_")[1]))
+    sequences = []
+    for key in horizon_keys:
+        h = buffer[key]
+        sequences.append(extract_stiffness_diag(h["ts_stiffnesses_0"][:]))  # (6, N_steps)
+    return sequences
+
+
+def load_scalar_stiffness_sequences(dataset_path: str):
+    """
+    Load the raw scalar stiffness sequences logged by the runner for each horizon.
+
+    Returns:
+        scalar_stiffnesses: list of (N_steps,) arrays, one per horizon.
+                            None entries mean the key was absent (old log format).
+        has_scalars:        True if at least one horizon had the key.
+    """
+    buffer = zarr.open(dataset_path, mode="r")
+    horizon_keys = sorted(buffer.keys(), key=lambda k: int(k.split("_")[1]))
+
+    scalar_stiffnesses = []
+    has_scalars = False
+    for key in horizon_keys:
+        h = buffer[key]
+        if "stiffness_scalars_0" in h:
+            scalar_stiffnesses.append(h["stiffness_scalars_0"][:])
+            has_scalars = True
+        else:
+            scalar_stiffnesses.append(None)
+
+    return scalar_stiffnesses, has_scalars
 
 
 def plot(dataset_path: str, episode_path: str = None,
@@ -174,10 +226,12 @@ def plot(dataset_path: str, episode_path: str = None,
         print(f"  No impedance_controller.log found in {dataset_path}, skipping wrench plot")
 
     ep_data = None
+    ep_wrench_data = None
     if plot_ground_truth and episode_path is not None:
         print(f"Loading episode: {episode_path}")
-        ep_ts, ep_stiffness, ep_nominal_pos, ep_virtual_pos = load_episode(episode_path)
+        ep_ts, ep_stiffness, ep_nominal_pos, ep_virtual_pos, ep_wts, ep_wraw, ep_wfilt = load_episode(episode_path)
         ep_data = (ep_ts, ep_stiffness, ep_nominal_pos, ep_virtual_pos)
+        ep_wrench_data = (ep_wts, ep_wraw, ep_wfilt)
 
     # load compare data if requested
     cmp_data = None
@@ -188,7 +242,7 @@ def plot(dataset_path: str, episode_path: str = None,
         try:
             cmp_ts, cmp_stiffness, cmp_nominal_pos, cmp_virtual_pos = load_log(compare_path)
             cmp_data = (cmp_ts, cmp_stiffness, cmp_nominal_pos, cmp_virtual_pos)
-            cmp_label = os.path.basename(compare_path)
+            cmp_label = os.path.basename(os.path.dirname(os.path.normpath(compare_path)))
             cmp_wrench_log = os.path.join(compare_path, "impedance_controller.log")
             if os.path.exists(cmp_wrench_log):
                 cmp_wts, cmp_w = load_wrench_log(compare_path)
@@ -196,44 +250,71 @@ def plot(dataset_path: str, episode_path: str = None,
         except Exception as e:
             print(f"  WARNING: could not load compare path — {e}. Skipping comparison.")
 
-    test_label = os.path.basename(dataset_path)
+    test_label = os.path.basename(os.path.dirname(os.path.normpath(dataset_path)))
 
-    # --- Figure 1: stiffness ---
-    has_ep = ep_data is not None
-    ncols = 2 if has_ep else 1
-    fig1, axes_grid = plt.subplots(6, ncols, figsize=(12 if has_ep else 8, 10),
-                                   squeeze=False)
-    fig1.suptitle("Stiffness: inference (left) vs ground truth (right)" if has_ep
-                  else f"Stiffness\n{dataset_path}")
+    # --- Figure 1: translational stiffness (Kx, Ky, Kz) with horizon X axis ---
+    def _norm_ts(ts):
+        d = ts[-1] - ts[0]
+        return (ts - ts[0]) / d if d > 0 else ts - ts[0]
 
-    for i, label in enumerate(DOF_LABELS):
-        unit = "N/m" if i < 3 else "Nm/rad"
-        ax_inf = axes_grid[i][0]
-        ax_inf.plot(timestamps, stiffness[i], color="steelblue",
-                    marker=".", markersize=4, label=test_label)
-        if cmp_data is not None:
-            ax_inf.plot(cmp_data[0], cmp_data[1][i], color="darkorange",
-                        linewidth=0.9, label=cmp_label)
-            ax_inf.legend(fontsize=6, loc="upper right")
-        ax_inf.set_ylabel(unit)
-        ax_inf.set_title(f"{label} — inference")
-        ax_inf.grid(True)
+    stiff_seqs = load_stiffness_sequences(dataset_path)
+    cmp_stiff_seqs = None
+    if compare_path is not None and cmp_data is not None:
+        try:
+            cmp_stiff_seqs = load_stiffness_sequences(compare_path)
+        except Exception as e:
+            print(f"  WARNING: could not load compare stiffness sequences — {e}")
 
-        if has_ep:
-            ax_gt = axes_grid[i][1]
-            if i < 3:
-                ax_gt.plot(ep_data[0], ep_data[1], color="orange", linewidth=0.8)
-                ax_gt.set_title(f"{label} — ground truth")
-            else:
-                ax_gt.set_title(f"{label} — ground truth (n/a)")
-                ax_gt.text(0.5, 0.5, "not estimated (dim=3)",
-                           ha="center", va="center", transform=ax_gt.transAxes,
-                           color="gray", fontsize=9)
-            ax_gt.set_ylabel(unit)
-            ax_gt.grid(True)
+    _TRANS_COLORS = ["red", "green", "blue"]
+    _TRANS_AXIS_LABELS = ["x-axis stiffness", "y-axis stiffness", "z-axis stiffness"]
 
-    for col in range(ncols):
-        axes_grid[-1][col].set_xlabel("Time (s)")
+    def _plot_stiff_dof(ax, sequences, dof_idx, color, series_label,
+                        lw_exec=1.5, lw_noexec=0.8, alpha=1.0):
+        exec_end = min(SPARSE_EXECUTION_HORIZON, sequences[0].shape[1])
+        for h_idx, seq in enumerate(sequences):
+            x = h_idx + np.arange(seq.shape[1]) / SPARSE_EXECUTION_HORIZON
+            vals = seq[dof_idx]
+            lbl = series_label if h_idx == 0 else "_nolegend_"
+            ax.plot(x[:exec_end], vals[:exec_end], color=color,
+                    linewidth=lw_exec, alpha=alpha, label=lbl)
+            if exec_end < seq.shape[1]:
+                ax.plot(x[exec_end - 1:], vals[exec_end - 1:],
+                        color=color, linewidth=lw_noexec, linestyle="--", alpha=alpha)
+
+    from matplotlib.lines import Line2D
+    _noexec_handle = Line2D([0], [0], color="gray", linewidth=1.0,
+                            linestyle="--", label="not executed action")
+
+    def _fill_ax(ax, sequences, subtitle):
+        for i, (dof_label, color) in enumerate(zip(_TRANS_AXIS_LABELS, _TRANS_COLORS)):
+            _plot_stiff_dof(ax, sequences, i, color=color, series_label=dof_label)
+        handles, labels = ax.get_legend_handles_labels()
+        ax.legend(handles=handles + [_noexec_handle],
+                  labels=labels + ["not executed action"],
+                  fontsize=7, loc="upper right")
+        ax.set_title(subtitle)
+        ax.set_ylabel("N/m")
+        ax.grid(True, axis="y", linestyle=":", alpha=0.5)
+        ax.set_xlim(-0.5, N + 0.5)
+        for j in range(1, N):
+            ax.axvline(j, color="gray", linewidth=0.4, linestyle=":", alpha=0.5)
+
+    nrows = 2 if cmp_stiff_seqs is not None else 1
+    fig_w1 = max(12, min(N * 1.0, 40))
+    fig1, axes_f1 = plt.subplots(nrows, 1, figsize=(fig_w1, 4 * nrows),
+                                  sharex=True, squeeze=False)
+    fig1.suptitle("Predicted Stiffness Value along Each World Coordinate Axis")
+
+    _fill_ax(axes_f1[0][0], stiff_seqs, test_label)
+    if cmp_stiff_seqs is not None:
+        _fill_ax(axes_f1[1][0], cmp_stiff_seqs, cmp_label)
+
+    # X-axis labels only on bottom subplot
+    axes_f1[-1][0].set_xticks(np.arange(N))
+    axes_f1[-1][0].set_xticklabels(
+        [f"Horizon {j + 1}" for j in range(N)],
+        rotation=45, ha="right", fontsize=7,
+    )
     fig1.tight_layout()
 
     # --- Figure 2: 3D trajectory ---
@@ -295,10 +376,12 @@ def plot(dataset_path: str, episode_path: str = None,
     set_axes_equal(ax3d)
 
     # --- Figure 3: filtered wrench + force norm ---
-    if wrench_data is not None:
-        w_ts, w = wrench_data
-        w_filt = process_wrench(w)
-        force_norm = np.linalg.norm(w_filt[:, :3], axis=1)
+    if wrench_data is not None or ep_wrench_data is not None:
+        w_filt = force_norm = w_ts = w = None
+        if wrench_data is not None:
+            w_ts, w = wrench_data
+            w_filt = process_wrench(w)
+            force_norm = np.linalg.norm(w_filt[:, :3], axis=1)
 
         cmp_filt_data = None
         if cmp_wrench_data is not None:
@@ -307,31 +390,127 @@ def plot(dataset_path: str, episode_path: str = None,
             cmp_force_norm = np.linalg.norm(cmp_w_filt[:, :3], axis=1)
             cmp_filt_data = (cmp_wts, cmp_w_filt, cmp_force_norm)
 
+        ep_force_norm = None
+        if ep_wrench_data is not None:
+            ep_force_norm = np.linalg.norm(ep_wrench_data[2][:, :3], axis=1)
+
+        w_ts_n       = _norm_ts(w_ts)                  if w_ts is not None        else None
+        cmp_ts_n     = _norm_ts(cmp_filt_data[0])      if cmp_filt_data is not None else None
+        ep_ts_n      = _norm_ts(ep_wrench_data[0])     if ep_wrench_data is not None else None
+
         fig3, f_axes = plt.subplots(7, 1, figsize=(12, 12), sharex=False)
         fig3.suptitle(
             f"Cartesian wrench — filtered (offset={WRENCH_OFFSET_SAMPLES} samples, "
             f"MA={WRENCH_MA_WINDOW} samples)\n{dataset_path}"
         )
+
         for i, (ax, label, unit) in enumerate(zip(f_axes[:6], WRENCH_LABELS, WRENCH_UNITS)):
-            ax.plot(w_ts, w[:, i], color="lightgray", linewidth=0.6, label="raw")
-            ax.plot(w_ts, w_filt[:, i], color="steelblue", linewidth=0.9, label=f"filtered: {test_label}")
+            if w_ts_n is not None:
+                 #ax.plot(w_ts_n, w[:, i], color="lightgray", linewidth=0.6, label="raw")
+                ax.plot(w_ts_n, w_filt[:, i], color="black", linewidth=0.9, label=f"filtered: {test_label}")
             if cmp_filt_data is not None:
-                ax.plot(cmp_filt_data[0], cmp_filt_data[1][:, i],
-                        color="darkorange", linewidth=0.9, linestyle="--", label=f"filtered: {cmp_label}")
+                ax.plot(cmp_ts_n, cmp_filt_data[1][:, i],
+                        color="red", linewidth=0.9, label=f"filtered: {cmp_label}")
+            if ep_wrench_data is not None:
+                #ax.plot(ep_ts_n, ep_wrench_data[1][:, i],
+                        #color="lightgreen", linewidth=0.6, label="gt raw")
+                ax.plot(ep_ts_n, ep_wrench_data[2][:, i],
+                        color="blue", linewidth=0.9, linestyle="--", label="gt filtered")
             ax.set_ylabel(unit)
             ax.set_title(label)
             ax.legend(fontsize=6, loc="upper right")
             ax.grid(True)
-        f_axes[6].plot(w_ts, force_norm, color="steelblue", linewidth=1.0, label=test_label)
+        if w_ts_n is not None:
+            f_axes[6].plot(w_ts_n, force_norm, color="black", linewidth=1.0, label=test_label)
         if cmp_filt_data is not None:
-            f_axes[6].plot(cmp_filt_data[0], cmp_filt_data[2],
-                           color="darkorange", linewidth=1.0, linestyle="--", label=cmp_label)
-            f_axes[6].legend(fontsize=6, loc="upper right")
+            f_axes[6].plot(cmp_ts_n, cmp_filt_data[2],
+                           color="red", linewidth=1.0, linestyle="--", label=cmp_label)
+        if ep_force_norm is not None:
+            f_axes[6].plot(ep_ts_n, ep_force_norm,
+                           color="blue", linewidth=1.0, linestyle="--", label="gt")
+        f_axes[6].legend(fontsize=6, loc="upper right")
         f_axes[6].set_ylabel("N")
         f_axes[6].set_title("||F|| (filtered)")
         f_axes[6].grid(True)
-        f_axes[-1].set_xlabel("Time (s)")
+        f_axes[-1].set_xlabel("Normalized time (0 = start, 1 = end)")
         fig3.tight_layout()
+
+    # --- Figure 4: scalar stiffness per step (top) + ground truth (bottom) ---
+    scalar_stiffnesses, has_scalars = load_scalar_stiffness_sequences(dataset_path)
+    if not has_scalars:
+        print("  No stiffness_scalars_0 found in log — skipping scalar stiffness figure.")
+    else:
+        n_horizons = len(scalar_stiffnesses)
+        n_steps    = len(scalar_stiffnesses[0])  # steps per horizon (action horizon)
+
+        # optionally load comparison scalar stiffnesses
+        cmp_scalar_stiffnesses = None
+        if compare_path is not None:
+            try:
+                cmp_ss, cmp_has = load_scalar_stiffness_sequences(compare_path)
+                if cmp_has:
+                    cmp_scalar_stiffnesses = cmp_ss
+                else:
+                    print("  WARNING: compare path has no stiffness_scalars_0, skipping compare in Fig 4.")
+            except Exception as e:
+                print(f"  WARNING: could not load compare scalar stiffness — {e}")
+
+        fig_w4 = max(10, min(n_horizons * 1.2, 40))
+        fig4, (ax4_top, ax4_bot) = plt.subplots(
+            2, 1, figsize=(fig_w4, 6), sharex=True
+        )
+        fig4.suptitle("Scalar Stiffness: Inference vs Ground Truth")
+
+        def _plot_scalar_series(ax, series, color, label):
+            """Plot one inference scalar stiffness series, solid/dashed for exec/non-exec."""
+            n_s = len(series[0]) if series[0] is not None else n_steps
+            exec_end = min(SPARSE_EXECUTION_HORIZON, n_s)
+            for h_idx, scalars in enumerate(series):
+                if scalars is None:
+                    continue
+                x = h_idx + np.arange(len(scalars)) / SPARSE_EXECUTION_HORIZON
+                ax.plot(x[:exec_end], scalars[:exec_end],
+                        color=color, linewidth=1.5,
+                        label=label if h_idx == 0 else "_nolegend_")
+                if exec_end < len(scalars):
+                    ax.plot(x[exec_end - 1:], scalars[exec_end - 1:],
+                            color=color, linewidth=0.8, linestyle="--")
+
+        # --- top: inference (test + optional compare) ---
+        _plot_scalar_series(ax4_top, scalar_stiffnesses, color="black", label=test_label)
+        if cmp_scalar_stiffnesses is not None:
+            _plot_scalar_series(ax4_top, cmp_scalar_stiffnesses, color="red", label=cmp_label)
+
+        for h_idx in range(1, n_horizons):
+            ax4_top.axvline(h_idx, color="gray", linewidth=0.6, linestyle=":", alpha=0.7)
+        ax4_top.set_ylabel("Stiffness (N/m)")
+        ax4_top.set_title("Inference  (solid = executed, dashed = not executed)")
+        ax4_top.legend(fontsize=8, loc="upper right")
+        ax4_top.grid(True, axis="y", linestyle=":", alpha=0.5)
+
+        # --- bottom: ground truth from TRAIN_PATH ---
+        if ep_data is not None:
+            ep_ts_gt, ep_stiffness_gt = ep_data[0], ep_data[1]
+            ep_ts_gt_norm = _norm_ts(ep_ts_gt) * n_horizons
+            ax4_bot.plot(ep_ts_gt_norm, ep_stiffness_gt,
+                         color="royalblue", linewidth=1.0, label="ground truth")
+            for h_idx in range(1, n_horizons):
+                ax4_bot.axvline(h_idx, color="gray", linewidth=0.6, linestyle=":", alpha=0.7)
+        else:
+            ax4_bot.text(0.5, 0.5, "No ground truth loaded\n(set FLAG_GROUND_TRUTH=True)",
+                         ha="center", va="center", transform=ax4_bot.transAxes,
+                         color="gray", fontsize=9)
+        ax4_bot.set_ylabel("Stiffness (N/m)")
+        ax4_bot.set_title("Ground Truth (TRAIN_PATH)")
+        ax4_bot.legend(fontsize=8, loc="upper right")
+        ax4_bot.grid(True, axis="y", linestyle=":", alpha=0.5)
+
+        # shared X axis labels on bottom subplot (sharex=True)
+        ax4_bot.set_xticks(np.arange(n_horizons))
+        ax4_bot.set_xticklabels([f"Horizon {i + 1}" for i in range(n_horizons)],
+                                rotation=45, ha="right", fontsize=8)
+        ax4_bot.set_xlim(0, n_horizons)
+        fig4.tight_layout()
 
     plt.show()
 
