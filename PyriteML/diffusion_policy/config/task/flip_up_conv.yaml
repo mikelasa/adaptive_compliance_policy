@@ -1,4 +1,4 @@
-name: flip_up_V3_200
+name: flip_up_200_demos_clip
 
 # rgb vs. low_dim: raw data are either rgb images or low_dim vectors. frames are aligned within each type.
 # obs vs. action: obs data are used as policy input; action are used as labels for policy output.
@@ -116,7 +116,7 @@ shape_meta: &shape_meta
         down_sample_steps: ${task.sparse_action_down_sample_steps} # int
 
 task_name: &task_name flip_up
-dataset_path: ${oc.env:PYRITE_DATASET_FOLDERS}/flip_up_V3_200_demos_400K_16f
+dataset_path: ${oc.env:PYRITE_DATASET_FOLDERS}/demonstration_impacts/E1_minimum_demos/200demos
 
 env_runner: # used in workspace for computing metrics
   _target_: diffusion_policy.env_runner.real_pusht_image_runner.RealPushTImageRunner
@@ -132,3 +132,4 @@ dataset:
   seed: 42
   val_ratio: 0.05
   normalize_wrench: True
+  n_demos: null  # set to 150, 100, or 50 to subsample; null uses all demos

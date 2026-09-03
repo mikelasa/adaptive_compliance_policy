@@ -1,0 +1,50 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Wrench-bias correction MLP — training config.
+#
+# Everything the training script needs lives here. Run with:
+#     python train_wrench_bias.py --config config/train_wrench_bias.yaml
+#
+# Any field can still be overridden on the command line, e.g. --epochs 800.
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: wrench_bias_tau_J_filter_relu   # used for output filenames and the wandb run name
+
+paths:
+  data_folder: /home/robotlab/data/real/wrench_calibration  # calibration episodes
+  output_dir:  /home/robotlab/data/wrench_bias_models        # where .npz/.bin/.png go
+  # Final artifacts are <output_dir>/<name>.{npz,bin} and <name>_test_scatter.png
+
+dataset:
+  robot_id: 0
+  window_frac: 0.6        # central fraction of each hold averaged into one sample
+  max_wrench_std: 0.5     # reject a hold if any wrench axis std exceeds this (N/Nm)
+  max_pos_std_m: 1.0e-3   # reject a hold if EE position is not settled (m)
+  val_frac: 0.1
+  test_frac: 0.1
+
+# Network architecture is fixed at INPUT_DIM -> hidden1 -> hidden2 -> 6.
+# (Changing these is fine; the exporter reads the real shapes from the model.)
+model:
+  hidden1: 128
+  hidden2: 64
+  dropout: 0.1
+  activation: relu   # relu | gelu | tanh | elu
+
+training:
+  device: cuda:0          # "cpu" to force CPU (model is tiny, CPU is fine)
+  seed: 0
+  epochs: 2000
+  batch_size: 64
+  lr: 1.0e-3
+  weight_decay: 1.0e-5
+  patience: 150           # early-stopping patience (epochs without val improvement)
+  loss: huber             # mse | huber  (huber is more robust to outlier wrench readings)
+  huber_delta: 1.0        # delta for huber loss (in normalised units)
+
+logging:
+  wandb: true
+  project: wrench_bias_calibration
+  entity: null            # null = your default wandb entity
+  mode: online            # online | offline | disabled
+  tags: ["wrench_bias", "franka"]
+  plot: true              # save predicted-vs-measured scatter PNG

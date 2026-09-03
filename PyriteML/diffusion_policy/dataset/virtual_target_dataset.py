@@ -59,6 +59,7 @@ class VirtualTargetDataset(BaseDataset):
         seed: int = 42,
         val_ratio: float = 0.0,
         normalize_wrench: bool = False,
+        n_demos: Optional[int] = None,
     ):
         # open dataset directly from disk — images are read on demand per sample,
         # avoiding loading the full (potentially multi-GB) dataset into RAM.
@@ -78,11 +79,23 @@ class VirtualTargetDataset(BaseDataset):
             raise RuntimeError("unsupported")
         self.action_type = action_type
         self.id_list = shape_meta["id_list"]
-        replay_buffer = self.raw_episodes_conversion(replay_buffer_raw, shape_meta)
 
-        # train/val mask for training
+        # randomly select n_demos episodes using seed for reproducibility;
+        # sorted keys + same seed guarantees nested subsets across runs
+        all_episode_keys = sorted(replay_buffer_raw["data"].keys())
+        if n_demos is not None and n_demos < len(all_episode_keys):
+            rng = np.random.default_rng(seed)
+            selected_indices = rng.choice(len(all_episode_keys), size=n_demos, replace=False)
+            selected_keys = [all_episode_keys[i] for i in sorted(selected_indices)]
+            print(f"[VirtualTargetDataset] using {n_demos}/{len(all_episode_keys)} demos")
+        else:
+            selected_keys = all_episode_keys
+
+        replay_buffer = self.raw_episodes_conversion(replay_buffer_raw, shape_meta, selected_keys)
+
+        # train/val mask sized to the selected subset
         val_mask = get_val_mask(
-            n_episodes=replay_buffer_raw.n_episodes, val_ratio=val_ratio, seed=seed
+            n_episodes=len(selected_keys), val_ratio=val_ratio, seed=seed
         )
         train_mask = ~val_mask
 
@@ -118,12 +131,12 @@ class VirtualTargetDataset(BaseDataset):
         self.normalize_wrench = normalize_wrench
 
     def raw_episodes_conversion(
-        self, replay_buffer_raw: ReplayBuffer, shape_meta: dict
+        self, replay_buffer_raw: ReplayBuffer, shape_meta: dict, episode_keys: list
     ):
         replay_buffer = dict()
         replay_buffer["data"] = dict()
 
-        for ep in replay_buffer_raw["data"].keys():
+        for ep in episode_keys:
             # iterates over episodes
             # ep: 'episode_xx'
             replay_buffer["data"][ep] = dict()

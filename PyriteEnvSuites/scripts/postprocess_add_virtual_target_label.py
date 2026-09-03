@@ -27,7 +27,7 @@ if "PYRITE_DATASET_FOLDERS" not in os.environ:
 dataset_folder_path = os.environ.get("PYRITE_DATASET_FOLDERS")
 
 # Config for flip up (single robot)
-dataset_path = dataset_folder_path + "/flip_up_V3_200_demos"
+dataset_path = dataset_folder_path + "/demonstration_impacts/E1_minimum_demos/200demos"
 id_list = [0]
 
 # # Config for vase wiping (bimanual)
@@ -40,8 +40,8 @@ wrench_filter_order = 5
 wrench_filter_fs = 1000.0
 buffer = zarr.open(dataset_path, mode="r+")
 
-num_of_process = 32
-flag_plot = False
+num_of_process = 1
+flag_plot = True
 fin_every_n = 50
 
 # struct that defines the parameters to simulate the penetration with a given stiffness
@@ -50,8 +50,8 @@ stiffness_estimation_para = {
     # penetration estimator
     "k_max": 2000,  # 1cm 50N maximum stiffness
     "k_min": 500,  # 1cm 2.5N minimum stiffness
-    "f_low": 10, #lower bound of the force
-    "f_high": 20,  #upper bound of the force
+    "f_low": 7, #lower bound of the force
+    "f_high": 17,  #upper bound of the force
     "dim": 3, #3 or 6, 3 for translational, 6 for full 6D
     "characteristic_length": 1, #the characteristic length for rotational stiffness
     "vel_tol": 999.002,  # (not using) vel larger than this will trigger stiffness adjustment
@@ -83,8 +83,8 @@ def process_episode(ep, ep_data, id_list):
         wrench = wrench - wrench_offset
 
         # # FT300 only: flip the sign of the wrench
-        # for i in range(6):
-        #     wrench[:, i] = -wrench[:, i]
+        #for i in range(6):
+        #    wrench[:, i] = -wrench[:, i]
 
         # filter wrench using zero-phase Butterworth (matches inference-time filter params)
         print("Computing Butterworth filter")
@@ -126,7 +126,9 @@ def process_episode(ep, ep_data, id_list):
 
             #apply moving average 
             if flag_real:
-                wrench_T = wrench_moving_average[t_wrench]
+                wrench_O = wrench_moving_average[t_wrench]
+                R = SE3_WT.R  # rotation tool→world; R.T converts world→tool
+                wrench_T = np.concatenate([R.T @ wrench_O[:3], R.T @ wrench_O[3:]])
             else:
                 pose7_WS = ft_sensor_pose_fb[t]
                 wrench_S = wrench_moving_average[t]

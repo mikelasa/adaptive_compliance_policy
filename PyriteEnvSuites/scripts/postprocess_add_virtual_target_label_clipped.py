@@ -27,7 +27,7 @@ if "PYRITE_DATASET_FOLDERS" not in os.environ:
 dataset_folder_path = os.environ.get("PYRITE_DATASET_FOLDERS")
 
 # Config for flip up (single robot)
-dataset_path = dataset_folder_path + "/flip_up_V3_200_demos_DCAM_400K_16F"
+dataset_path = dataset_folder_path + "/demonstration_impacts/E1_minimum_demos/200demos"
 id_list = [0]
 
 # # Config for vase wiping (bimanual)
@@ -45,11 +45,11 @@ flag_plot = False
 fin_every_n = 50
 
 stiffness_estimation_para = {
-    "k_max": 2000,
-    "k_min": 400,
-    "f_low": 10,
-    "f_high": 15,
-    "max_disp": 0.02,  #
+    "k_max": 2000,  # 1cm 50N maximum stiffness
+    "k_min": 500,  # 1cm 2.5N minimum stiffness
+    "f_low": 7, #lower bound of the force
+    "f_high": 17,  #upper bound of the force
+    "max_disp": 0.034,  #
     "dim": 3,
     "characteristic_length": 1,
     "vel_tol": 999.002,
@@ -121,7 +121,9 @@ def process_episode(ep, ep_data, id_list):
             t_wrench = np.argmin(np.abs(wrench_time_stamps - robot_time_stamps[t]))
 
             if flag_real:
-                wrench_T = wrench_moving_average[t_wrench]
+                wrench_O = wrench_moving_average[t_wrench]
+                R = SE3_WT.R  # rotation tool→world; R.T converts world→tool
+                wrench_T = np.concatenate([R.T @ wrench_O[:3], R.T @ wrench_O[3:]])
             else:
                 pose7_WS = ft_sensor_pose_fb[t]
                 wrench_S = wrench_moving_average[t]

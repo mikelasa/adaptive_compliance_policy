@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 from diffusion_policy.model.diffusion.positional_embedding import SinusoidalPosEmb
 from diffusion_policy.model.common.module_attr_mixin import ModuleAttrMixin
+from diffusion_policy.model.vision.utils.attention_viz import VizTransformerDecoderLayer
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +29,11 @@ class TransformerForActionDiffusion(ModuleAttrMixin):
         self.cond_pos_emb =  nn.Parameter(torch.randn((1, max_cond_tokens, n_emb)))
         
         # decoder
-        decoder_layer = nn.TransformerDecoderLayer(
+        # VizTransformerDecoderLayer is a drop-in for nn.TransformerDecoderLayer that
+        # additionally captures cross-attention weights (action queries -> cond
+        # tokens) into `self.last_attn_weights` when attention_viz.VISUALIZE_ATTENTION
+        # is True; zero overhead otherwise (see attention_viz.py).
+        decoder_layer = VizTransformerDecoderLayer(
             d_model=n_emb,
             nhead=n_head,
             dim_feedforward=4*n_emb,
@@ -41,13 +46,28 @@ class TransformerForActionDiffusion(ModuleAttrMixin):
             decoder_layer=decoder_layer,
             num_layers=n_layer
         )
-        
+
         # decoder head
         self.ln_f = nn.LayerNorm(n_emb)
         self.head = nn.Linear(n_emb, output_dim)
-        
+
         self.action_horizon = action_horizon
-        
+
+        # causal mask over the action-horizon tokens: position i may only attend to
+        # positions <= i (matches ImplicitRDP's causal transformer denoiser). Sized to
+        # the full action_horizon at construction time and sliced to the actual
+        # sequence length in forward() (registered as a non-persistent buffer so it
+        # follows .to(device)/.to(dtype) without being saved in checkpoints).
+        self.register_buffer(
+            "causal_mask",
+            nn.Transformer.generate_square_subsequent_mask(action_horizon),
+            persistent=False,
+        )
+
+        # attention-viz capture: one entry per denoising step accumulated during a
+        # single conditional_sample() call, consumed by pop_attention_viz_capture().
+        self._captured_cross_attn_steps = []
+
         # init
         self.apply(self._init_weights)
         logger.info(
@@ -207,12 +227,57 @@ class TransformerForActionDiffusion(ModuleAttrMixin):
         input_emb = input_emb + pos_emb
         
         # 4. transformer
+        # causal self-attention over the action-horizon: position i can only see
+        # positions <= i. tgt_is_causal=True lets SDPA use the fast causal kernel
+        # since causal_mask is exactly the standard upper-triangular -inf mask.
+        tgt_mask = self.causal_mask[:t, :t].to(dtype=input_emb.dtype)
         x = self.decoder(
             tgt=input_emb,
-            memory=cond_emb
-        )        
+            memory=cond_emb,
+            tgt_mask=tgt_mask,
+            tgt_is_causal=True,
+        )
         x = self.ln_f(x)
         x = self.head(x)
         # (B, T, n_out)
+
+        # attention visualization (inference only; no-op when disabled). Only
+        # captured outside training to avoid unboundedly growing the per-step
+        # accumulation list across an entire training run.
+        if not self.training:
+            last_layer = self.decoder.layers[-1]
+            if hasattr(last_layer, "last_attn_weights"):
+                # (B, T_action, tc) averaged over heads -> keep batch 0 on CPU
+                self._captured_cross_attn_steps.append(
+                    last_layer.last_attn_weights[0].float().cpu()
+                )
+                del last_layer.last_attn_weights
+
         return x
-        
+
+    def reset_attention_viz_capture(self):
+        """Clear any cross-attention weights accumulated so far. Call before
+        starting a fresh conditional_sample() loop so a previous (possibly
+        aborted) run can't leak into the next capture."""
+        self._captured_cross_attn_steps = []
+
+    def pop_attention_viz_capture(self):
+        """Average the cross-attention weights captured across every denoising
+        step of the last conditional_sample() call into a single per-cond-token
+        vector, and clear the internal buffer.
+
+        Returns:
+            np.ndarray of shape (n_cond_tokens,) — average attention mass each
+            cond token (obs tokens..., then the trailing diffusion-timestep
+            token) received from action-horizon queries, averaged over both the
+            action-horizon queries and the denoising steps. None if nothing was
+            captured (VISUALIZE_ATTENTION was off, or this ran in training mode).
+        """
+        if not self._captured_cross_attn_steps:
+            return None
+        # (n_denoise_steps, T_action, tc) -> (tc,)
+        stacked = torch.stack(self._captured_cross_attn_steps, dim=0)
+        avg = stacked.mean(dim=(0, 1)).numpy()
+        self._captured_cross_attn_steps = []
+        return avg
+

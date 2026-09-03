@@ -35,6 +35,7 @@ class TimmObsEncoderWithForceV2(ModuleAttrMixin):
         reduce_pretrained_lr: bool,
         vision_encoder_cfg: dict,
         force_encoder_cfg: dict,
+        second_camera: bool = False,
         position_encoding: str = "learnable",
         symbol_retriever: str = "position_relative",  # positional | position_relative | symbolic | relational_symbolic
         symbol_retriever_cfg: dict = None,
@@ -47,6 +48,7 @@ class TimmObsEncoderWithForceV2(ModuleAttrMixin):
         dat_dropout_rate: float = 0.0,
         dat_norm_first: bool = True,
         dat_ra_kwargs: dict = None,
+        symmetric_rels: bool = True,
         vidat_n_layers: int = 2,
     ):
         """
@@ -160,6 +162,8 @@ class TimmObsEncoderWithForceV2(ModuleAttrMixin):
             type = attr.get("type", "low_dim")
             key_shape_map[key] = shape
             if type == "rgb":
+                if rgb_keys and not second_camera:
+                    continue  # single-camera mode: skip additional cameras
                 rgb_keys.append(key)
                 key_model_map[key] = (
                     vision_encoder
@@ -303,6 +307,11 @@ class TimmObsEncoderWithForceV2(ModuleAttrMixin):
             else:
                 raise ValueError(f"Unknown symbol retriever type: {symbol_retriever}")
 
+            # merge symmetric_rels into ra_kwargs; explicit dat_ra_kwargs entries take precedence
+            _ra_kwargs = {"symmetric_rels": symmetric_rels}
+            if dat_ra_kwargs:
+                _ra_kwargs.update(dat_ra_kwargs)
+
             # ViDAT layers shared across cameras and frames — learns generalizable
             # spatial relational patterns, not camera-specific ones.
             self.vidat_encoder = nn.ModuleList([
@@ -315,7 +324,7 @@ class TimmObsEncoderWithForceV2(ModuleAttrMixin):
                     dropout_rate=dat_dropout_rate,
                     norm_first=dat_norm_first,
                     share_attn_params=share_attn_params,
-                    ra_kwargs=dat_ra_kwargs,
+                    ra_kwargs=_ra_kwargs,
                 )
                 for _ in range(vidat_n_layers)
             ])

@@ -105,6 +105,40 @@ class VizCrossAttention(CrossAttention):
         return img_out
 
 
+class VizTransformerDecoderLayer(nn.TransformerDecoderLayer):
+    """Drop-in replacement for nn.TransformerDecoderLayer that captures the
+    averaged cross-attention weight matrix (tgt queries -> memory keys) into
+    ``self.last_attn_weights`` whenever VISUALIZE_ATTENTION is True.
+
+    Unlike VizTransformerEncoderLayer, nn.TransformerDecoderLayer.forward()
+    calls _mha_block directly with no sparsity fast-path bypassing it, so
+    overriding _mha_block alone is sufficient — no need to override forward().
+    """
+
+    def _mha_block(self, x: Tensor, mem: Tensor,
+                    attn_mask: Optional[Tensor], key_padding_mask: Optional[Tensor],
+                    is_causal: bool = False) -> Tensor:
+        if VISUALIZE_ATTENTION:
+            x, weights = self.multihead_attn(
+                x, mem, mem,
+                attn_mask=attn_mask,
+                key_padding_mask=key_padding_mask,
+                need_weights=True,
+                average_attn_weights=True,  # average over heads -> (B, T_tgt, T_mem)
+                is_causal=is_causal,
+            )
+            self.last_attn_weights = weights.detach()
+        else:
+            x = self.multihead_attn(
+                x, mem, mem,
+                attn_mask=attn_mask,
+                key_padding_mask=key_padding_mask,
+                need_weights=False,
+                is_causal=is_causal,
+            )[0]
+        return self.dropout2(x)
+
+
 class VizAttentionPool1d(AttentionPool1d):
     """Drop-in for AttentionPool1d that captures pooling weights into
     ``self.last_attn_weights`` when VISUALIZE_ATTENTION is True.

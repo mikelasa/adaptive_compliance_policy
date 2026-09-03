@@ -1,4 +1,5 @@
 import copy
+import numpy as np
 
 import timm
 import torch
@@ -8,13 +9,11 @@ import logging
 
 from diffusion_policy.model.common.module_attr_mixin import ModuleAttrMixin
 from diffusion_policy.common.pytorch_util import replace_submodules
-from diffusion_policy.model.vision.utils.cross_attention import CrossAttention
-from diffusion_policy.model.vision.utils.attention_pool import AttentionPool1d
 from diffusion_policy.model.vision.utils.attention_viz import (
     VizTransformerEncoderLayer,
     VizCrossAttention,
-    VizAttentionPool1d,
 )
+import diffusion_policy.model.vision.utils.attention_viz as attention_viz
 
 from multimodal_representation.multimodal.models.base_models.encoders import (
     ForceEncoder,
@@ -32,7 +31,7 @@ from dual_attention.symbol_retrieval import (
 logger = logging.getLogger(__name__)
 
 
-class TimmObsEncoderWithForceV1(ModuleAttrMixin):
+class TimmObsEncoderBiCrossDATTransformer(ModuleAttrMixin):
     def __init__(
         self,
         shape_meta: dict,
@@ -43,12 +42,14 @@ class TimmObsEncoderWithForceV1(ModuleAttrMixin):
         second_camera: bool = False,
         position_encoding: str = "learnable",
         use_relational_features: bool = False,
-        symbol_retriever: str = "positional",  # positional | position_relative | symbolic | relational_symbolic
+        symbol_retriever: str = "positional",
         symbol_retriever_cfg: dict = None,
         bi_cross_heads: int = 4,
+        bi_cross_attn_drop: float = 0.0,
+        bi_cross_drop: float = 0.0,
         n_heads_sa: int = 4,
         n_heads_ra: int = 4,
-        share_attn_params: bool = False,  # whether to share parameters between SA and RA in the feature aggregation module
+        share_attn_params: bool = False,
         dat_dff: int = 2048,
         dat_activation: str = "relu",
         dat_dropout_rate: float = 0.0,
@@ -57,14 +58,21 @@ class TimmObsEncoderWithForceV1(ModuleAttrMixin):
         dat_n_layers: int = 1,
     ):
         """
-        Assumes rgb input: B,T,C,H,W
-        Assumes low_dim input: B,T,D
+        Token-sequence variant of TimmObsEncoderWithForceV1 for transformer diffusion
+        policies. Returns (B, N, D) instead of (B, D) — AttentionPool1d is removed so
+        the full fused sequence is passed directly to the transformer denoiser.
 
         fuse_mode:
-            'modality-attention'  – ViT CLS token per frame, self-attention across modalities
-            'bi-cross-attention'     – all ViT patch tokens, bidirectional cross-attention with force
-            'bi-cross-attention-DAT' – same as above, then DAT encoder for relational features
-            'DAT'                    – all ViT patch tokens concatenated with force tokens, DAT encoder only (no cross-attention)
+            'modality-attention'     – CLS token per frame + self-attn across modalities;
+                                       returns (B, n_features [+ n_lowdim], D)
+            'bi-cross-attention'     – all patch tokens, bidirectional cross-attn with force;
+                                       returns (B, total_tokens [+ n_lowdim], D)
+            'bi-cross-attention-DAT' – same + DAT relational encoder;
+                                       returns (B, total_tokens [+ n_lowdim], D)
+            'DAT'                    – all tokens concatenated + DAT encoder;
+                                       returns (B, total_tokens [+ n_lowdim], D)
+
+        low_dim keys (non-wrench) are projected to v_feature_dim and appended as tokens.
         """
         super().__init__()
 
@@ -84,7 +92,6 @@ class TimmObsEncoderWithForceV1(ModuleAttrMixin):
             pretrained=vision_encoder_cfg.pretrained,
             global_pool=vision_encoder_cfg.global_pool,
             num_classes=0,
-            #img_size=224,
         )
         if vision_encoder_cfg.frozen:
             assert vision_encoder_cfg.pretrained
@@ -106,10 +113,6 @@ class TimmObsEncoderWithForceV1(ModuleAttrMixin):
         self.v_feature_dim = vision_encoder.embed_dim
 
         # ── force encoder ─────────────────────────────────────────────────────
-        # type: "fft"   → ForceEncoder (causal 1D conv, channels-first input)
-        #                  output: (B, 2*feature_dim, T_out) → take [:, :, -1]
-        # type: "cnn1d" → FTEmbed (1D conv + residual, time-first input)
-        #                  output: (B, T, feature_dim)        → take [:, -1, :]
         force_encoder_type = getattr(force_encoder_cfg, "type", "fft")
         if force_encoder_type == "fft":
             force_encoder = ForceEncoder(force_encoder_cfg.feature_dim)
@@ -124,7 +127,7 @@ class TimmObsEncoderWithForceV1(ModuleAttrMixin):
         else:
             raise ValueError(f"Unknown force_encoder type: {force_encoder_type!r}")
         self.force_encoder_type = force_encoder_type
-        self.fft_last_n_tokens = 1  # default; overridden for bi-cross modes after clamping
+        self.fft_last_n_tokens = 1
         if force_encoder_cfg.frozen:
             for param in force_encoder.parameters():
                 param.requires_grad = False
@@ -161,12 +164,12 @@ class TimmObsEncoderWithForceV1(ModuleAttrMixin):
             key_shape_map[key] = shape
             if type == "rgb":
                 if rgb_keys and not second_camera:
-                    continue  # single-camera mode: ignore additional cameras
+                    continue
                 if vision_encoder_cfg.share_rgb_model:
                     key_model_map[key] = vision_encoder
-                elif not rgb_keys:  # primary camera
+                elif not rgb_keys:
                     key_model_map[key] = copy.deepcopy(vision_encoder)
-                else:  # secondary camera: duplicate of primary encoder
+                else:
                     key_model_map[key] = copy.deepcopy(key_model_map[rgb_keys[0]])
                 rgb_keys.append(key)
                 key_transform_map[key] = vision_transform
@@ -192,6 +195,17 @@ class TimmObsEncoderWithForceV1(ModuleAttrMixin):
         logger.info("wrench_keys:  %s", wrench_keys)
         logger.info("low_dim_keys: %s", low_dim_keys)
 
+        # ── low_dim projection to token space ─────────────────────────────────
+        # Each low_dim key (B, T, D_k) is projected to (B, T, v_feature_dim) tokens.
+        key_lowdim_proj_map = nn.ModuleDict()
+        for key in low_dim_keys:
+            d_k = int(np.prod(key_shape_map[key]))
+            key_lowdim_proj_map[key] = (
+                nn.Identity() if d_k == self.v_feature_dim
+                else nn.Linear(d_k, self.v_feature_dim)
+            )
+        self.key_lowdim_proj_map = key_lowdim_proj_map
+
         self.vision_encoder_cfg = vision_encoder_cfg
         self.force_encoder_cfg = force_encoder_cfg
         self.shape_meta = shape_meta
@@ -216,11 +230,8 @@ class TimmObsEncoderWithForceV1(ModuleAttrMixin):
         # ── fuse-mode specific modules ────────────────────────────────────────
         if fuse_mode == "modality-attention":
             assert force_encoder_type != "cnn1d", (
-                "fuse_mode='modality-attention' is incompatible with force_encoder_cfg.type='cnn1d': "
-                "cnn1d produces wrench_horizon tokens per wrench key, but modality-attention expects "
-                "exactly 1 token per wrench key. Use fft encoder or switch to a bi-cross/DAT fuse_mode."
+                "fuse_mode='modality-attention' is incompatible with force_encoder_cfg.type='cnn1d'."
             )
-            # 1 CLS token per frame + 1 token per wrench key (fft only)
             n_features = len(rgb_keys) * rgb_horizon + len(wrench_keys)
             self.transformer_encoder = VizTransformerEncoderLayer(
                 d_model=self.v_feature_dim,
@@ -229,16 +240,13 @@ class TimmObsEncoderWithForceV1(ModuleAttrMixin):
                 batch_first=True,
                 dropout=0.0,
             )
-            self.linear_projection = nn.Linear(
-                self.v_feature_dim * n_features, self.v_feature_dim
-            )
+            # No linear_projection: the full (B, n_features, D) token sequence is returned.
             if position_encoding == "learnable":
                 self.position_embedding = torch.nn.Parameter(
                     torch.randn(n_features, self.v_feature_dim)
                 )
 
         if self.fuse_mode in ("bi-cross-attention", "bi-cross-attention-DAT", "DAT"):
-            # all patch tokens + CLS per frame: (H/patch_size * W/patch_size) + 1
             n_patches = (
                 (image_shape[0] // vision_encoder_cfg.downsample_ratio)
                 * (image_shape[1] // vision_encoder_cfg.downsample_ratio)
@@ -263,26 +271,25 @@ class TimmObsEncoderWithForceV1(ModuleAttrMixin):
                 n_force_tokens = len(wrench_keys) * wrench_horizon
             else:
                 n_force_tokens = len(wrench_keys) * fft_last_n_tokens
-            total_tokens = len(rgb_keys) * rgb_horizon * tokens_per_frame + n_force_tokens
+
             if self.fuse_mode in ("bi-cross-attention", "bi-cross-attention-DAT"):
                 self.img_cross_attention = VizCrossAttention(
-                    model_dim=self.v_feature_dim, num_heads=self.bi_cross_heads
+                    model_dim=self.v_feature_dim, num_heads=self.bi_cross_heads,
+                    attn_drop=bi_cross_attn_drop, drop=bi_cross_drop,
                 )
                 self.force_cross_attention = VizCrossAttention(
-                    model_dim=self.v_feature_dim, num_heads=self.bi_cross_heads
+                    model_dim=self.v_feature_dim, num_heads=self.bi_cross_heads,
+                    attn_drop=bi_cross_attn_drop, drop=bi_cross_drop,
                 )
-            self.attn_pool = VizAttentionPool1d(
-                seq_len=total_tokens,
-                embed_dim=self.v_feature_dim,
-                num_heads=self.v_feature_dim // 64,
-                output_dim=self.v_feature_dim,
-            )
-        # DAT-only and bi-cross-attention-DAT: relational feature extraction via DAT encoder
+
+            # total_tokens is the fused sequence length before low_dim tokens are appended
+            total_tokens = len(rgb_keys) * rgb_horizon * tokens_per_frame + n_force_tokens
+            self.total_tokens = total_tokens
+
         if self.fuse_mode in ("bi-cross-attention-DAT", "DAT"):
             symbol_dim = self.symbol_retriever_cfg.symbol_dim
             assert symbol_dim == self.v_feature_dim, (
-                f"symbol_dim ({symbol_dim}) must equal v_feature_dim ({self.v_feature_dim}) "
-                "because RelationalAttention projects symbols with d_model-sized weights."
+                f"symbol_dim ({symbol_dim}) must equal v_feature_dim ({self.v_feature_dim})."
             )
             if symbol_retriever == "positional":
                 self.symbol_retriever_module = PositionalSymbolRetriever(
@@ -311,7 +318,6 @@ class TimmObsEncoderWithForceV1(ModuleAttrMixin):
             else:
                 raise ValueError(f"Unknown symbol retriever type: {symbol_retriever}")
 
-            # DAT encoder over all fused tokens
             self.DAT_encoder = nn.ModuleList([
                 DualAttnEncoderBlock(
                     d_model=self.v_feature_dim,
@@ -337,13 +343,16 @@ class TimmObsEncoderWithForceV1(ModuleAttrMixin):
             rgb:     (B, T, C, H, W)
             wrench:  (B, T, D)
             low_dim: (B, T, D)
+
+        Returns:
+            tokens: (B, N, v_feature_dim)
         """
-        rgb_features = []    # one entry per camera: (B, tokens, D)
-        force_features = []  # one entry per wrench key: (B, tokens, D)
-        low_dim_features = []
+        rgb_features = []
+        force_features = []
+        low_dim_tokens = []
         batch_size = next(iter(obs_dict.values())).shape[0]
 
-        # ── rgb: encode each camera independently, then concatenate ──────────
+        # ── rgb ───────────────────────────────────────────────────────────────
         for key in self.rgb_keys:
             img = obs_dict[key]  # (B, T, C, H, W)
             B, T = img.shape[:2]
@@ -353,28 +362,23 @@ class TimmObsEncoderWithForceV1(ModuleAttrMixin):
 
             if self.vision_encoder_cfg.frozen:
                 with torch.no_grad():
-                    raw_feature = self.key_model_map[key](img)  # (B*T, 1+n_reg+n_patches, D)
+                    raw_feature = self.key_model_map[key](img)
             else:
-                raw_feature = self.key_model_map[key](img)  # (B*T, 1+n_reg+n_patches, D)
+                raw_feature = self.key_model_map[key](img)
 
-            # strip register tokens if present (e.g. DINOv3): keep CLS + patch tokens only
             reg_token = getattr(self.key_model_map[key], 'reg_token', None)
             n_reg = reg_token.shape[1] if reg_token is not None else 0
             if n_reg > 0:
                 raw_feature = torch.cat([raw_feature[:, :1], raw_feature[:, 1 + n_reg:]], dim=1)
-            # → (B*T, 1+n_patches, D)
 
             if self.fuse_mode == "modality-attention":
-                # CLS token only → (B, T, D)
-                feature = raw_feature[:, 0, :]
+                feature = raw_feature[:, 0, :]              # CLS token → (B*T, D)
                 rgb_features.append(feature.reshape(B, T, -1))
             else:
-                # all tokens → (B, T*(L+1), D)
-                feature = raw_feature.reshape(B, T * raw_feature.shape[1], -1)
+                feature = raw_feature.reshape(B, T * raw_feature.shape[1], -1)  # (B, T*(L+1), D)
                 rgb_features.append(feature)
 
-        # concatenate all camera ViT outputs along the sequence dimension
-        rgb_tokens = torch.cat(rgb_features, dim=1)  # (B, n_cams*T*(L+1), D)
+        rgb_tokens = torch.cat(rgb_features, dim=1)
 
         # ── wrench ────────────────────────────────────────────────────────────
         for key in self.wrench_keys:
@@ -382,20 +386,25 @@ class TimmObsEncoderWithForceV1(ModuleAttrMixin):
             B, T = data.shape[:2]
             assert B == batch_size
             if self.force_encoder_type == "fft":
-                data = data.permute(0, 2, 1)                                        # (B, 6, T)
-                feature = self.key_model_map[key](data.float())                     # (B, 2*feature_dim, T_out)
-                feature = feature[:, :, -self.fft_last_n_tokens:].permute(0, 2, 1) # (B, last_n_tokens, D)
+                data = data.permute(0, 2, 1)
+                feature = self.key_model_map[key](data.float())
+                feature = feature[:, :, -self.fft_last_n_tokens:].permute(0, 2, 1)  # (B, last_n, D)
                 force_features.append(feature)
-            else:  # cnn1d — keep all T wrench tokens as separate sequence
-                feature = self.key_model_map[key](data.float())  # (B, T, feature_dim)
-                force_features.append(feature)                   # (B, T, D)
+            else:
+                feature = self.key_model_map[key](data.float())  # (B, T, D)
+                force_features.append(feature)
 
-        # ── low_dim ───────────────────────────────────────────────────────────
+        # ── low_dim → tokens ──────────────────────────────────────────────────
         for key in self.low_dim_keys:
-            data = obs_dict[key]  # (B, T, D)
+            data = obs_dict[key]  # (B, T, D_k)
             B, T = data.shape[:2]
             assert B == batch_size
-            low_dim_features.append(data.reshape(B, -1))
+            proj = self.key_lowdim_proj_map[key]
+            tokens = proj(data.reshape(B, T, -1).float())  # (B, T, v_feature_dim)
+            low_dim_tokens.append(tokens)
+
+        if low_dim_tokens:
+            low_dim_tokens = [torch.cat(low_dim_tokens, dim=1)]  # (B, n_lowdim, D)
 
         # ── fusion ────────────────────────────────────────────────────────────
         if self.fuse_mode == "modality-attention":
@@ -405,168 +414,92 @@ class TimmObsEncoderWithForceV1(ModuleAttrMixin):
                 if self.position_embedding.device != in_embeds.device:
                     self.position_embedding = self.position_embedding.to(in_embeds.device)
                 in_embeds = in_embeds + self.position_embedding
-            out_embeds = self.transformer_encoder(in_embeds)         # (B, n_features, D)
+            result = self.transformer_encoder(in_embeds)  # (B, n_features, D)
 
             # attention visualization (inference only; no-op when disabled)
             if hasattr(self.transformer_encoder, "last_attn_weights"):
-                self._dump_modality_attention(
-                    self.transformer_encoder.last_attn_weights,
-                    n_img=rgb_tokens.shape[1],
-                )
+                self._captured_fusion_attn = {
+                    "kind": "self",
+                    "self_attn_per_key": self.transformer_encoder.last_attn_weights[0]
+                        .float().mean(dim=0).cpu().numpy(),  # (L,) avg over queries
+                    "n_img": int(rgb_tokens.shape[1]),
+                }
                 del self.transformer_encoder.last_attn_weights
 
-            result = self.linear_projection(out_embeds.reshape(B, -1))  # (B, D)
-
         elif self.fuse_mode == "bi-cross-attention":
-            force_tokens = torch.cat(force_features, dim=1)          # (B, n_wrench, D)
-
-            img_enhanced   = self.img_cross_attention(rgb_tokens, force_tokens)    # (B, n_cams*T*(L+1), D)
-            force_enhanced = self.force_cross_attention(force_tokens, rgb_tokens)  # (B, n_wrench, D)
-
-            fused  = torch.cat([img_enhanced, force_enhanced], dim=1)  # (B, total_tokens, D)
-            result = self.attn_pool(fused)                              # (B, D)
-
-            # attention visualization (inference only; no-op when disabled)
-            if hasattr(self.attn_pool, "last_attn_weights"):
-                cross_img_w   = getattr(self.img_cross_attention,   "last_attn_weights", None)
-                cross_force_w = getattr(self.force_cross_attention, "last_attn_weights", None)
-                self._dump_bidat_attention(
-                    self.attn_pool.last_attn_weights,
-                    cross_img_w,
-                    cross_force_w,
-                    n_img=rgb_tokens.shape[1],
-                    n_force=force_tokens.shape[1],
-                )
-                del self.attn_pool.last_attn_weights
-                if cross_img_w is not None:
-                    del self.img_cross_attention.last_attn_weights
-                if cross_force_w is not None:
-                    del self.force_cross_attention.last_attn_weights
+            force_tokens = torch.cat(force_features, dim=1)
+            img_enhanced   = self.img_cross_attention(rgb_tokens, force_tokens)
+            force_enhanced = self.force_cross_attention(force_tokens, rgb_tokens)
+            result = torch.cat([img_enhanced, force_enhanced], dim=1)  # (B, total_tokens, D)
+            self._capture_cross_fusion_attn(rgb_tokens, force_tokens)
 
         elif self.fuse_mode == "bi-cross-attention-DAT":
-            force_tokens = torch.cat(force_features, dim=1)          # (B, n_wrench, D)
-
-            img_enhanced   = self.img_cross_attention(rgb_tokens, force_tokens)    # (B, n_cams*T*(L+1), D)
-            force_enhanced = self.force_cross_attention(force_tokens, rgb_tokens)  # (B, n_wrench, D)
-
-            fused = torch.cat([img_enhanced, force_enhanced], dim=1)  # (B, total_tokens, D)
+            force_tokens = torch.cat(force_features, dim=1)
+            img_enhanced   = self.img_cross_attention(rgb_tokens, force_tokens)
+            force_enhanced = self.force_cross_attention(force_tokens, rgb_tokens)
+            fused = torch.cat([img_enhanced, force_enhanced], dim=1)
             for layer in self.DAT_encoder:
-                symbols = self.symbol_retriever_module(fused)           # (B, total_tokens, symbol_dim)
-                fused   = layer(fused, symbols)                         # (B, total_tokens, D)
-            result = self.attn_pool(fused)                              # (B, D)
-
-            # attention visualization (inference only; no-op when disabled)
-            if hasattr(self.attn_pool, "last_attn_weights"):
-                cross_img_w   = getattr(self.img_cross_attention,   "last_attn_weights", None)
-                cross_force_w = getattr(self.force_cross_attention, "last_attn_weights", None)
-                self._dump_bidat_attention(
-                    self.attn_pool.last_attn_weights,
-                    cross_img_w,
-                    cross_force_w,
-                    n_img=rgb_tokens.shape[1],
-                    n_force=force_tokens.shape[1],
-                )
-                del self.attn_pool.last_attn_weights
-                if cross_img_w is not None:
-                    del self.img_cross_attention.last_attn_weights
-                if cross_force_w is not None:
-                    del self.force_cross_attention.last_attn_weights
+                symbols = self.symbol_retriever_module(fused)
+                fused   = layer(fused, symbols)
+            result = fused  # (B, total_tokens, D)
+            self._capture_cross_fusion_attn(rgb_tokens, force_tokens)
 
         elif self.fuse_mode == "DAT":
-            force_tokens = torch.cat(force_features, dim=1)          # (B, n_wrench, D)
-
-            fused = torch.cat([rgb_tokens, force_tokens], dim=1)  # (B, total_tokens, D)
+            force_tokens = torch.cat(force_features, dim=1)
+            fused = torch.cat([rgb_tokens, force_tokens], dim=1)
             for layer in self.DAT_encoder:
-                symbols = self.symbol_retriever_module(fused)      # (B, total_tokens, symbol_dim)
-                fused   = layer(fused, symbols)                    # (B, total_tokens, D)
-            result = self.attn_pool(fused)                         # (B, D)
+                symbols = self.symbol_retriever_module(fused)
+                fused   = layer(fused, symbols)
+            result = fused  # (B, total_tokens, D)
+            # no cross-attention in DAT-only mode, so there's no VizCrossAttention
+            # to hasattr-check against — gate directly on the module flag instead.
+            # Still record token counts so the denoiser-side capture can be split
+            # into img/force segments even though the encoder has nothing of its
+            # own to show.
+            if attention_viz.VISUALIZE_ATTENTION:
+                self._captured_fusion_attn = {
+                    "kind": "none",
+                    "n_img": int(rgb_tokens.shape[1]),
+                    "n_force": int(force_tokens.shape[1]),
+                }
 
-            # attention visualization (inference only; no-op when disabled)
-            if hasattr(self.attn_pool, "last_attn_weights"):
-                self._dump_bidat_attention(
-                    self.attn_pool.last_attn_weights,
-                    None,  # no cross-attention in DAT mode
-                    None,
-                    n_img=rgb_tokens.shape[1],
-                    n_force=force_tokens.shape[1],
-                )
-                del self.attn_pool.last_attn_weights
+        # append low_dim tokens along the sequence dimension
+        if low_dim_tokens:
+            result = torch.cat([result] + low_dim_tokens, dim=1)
 
-        if low_dim_features:
-            result = torch.cat([result, torch.cat(low_dim_features, dim=-1)], dim=-1)
+        return result  # (B, N, D)
 
-        return result
-
-    def _dump_modality_attention(self, weights, n_img):
-        """Split the captured self-attention weights into image vs force mass
-        and pickle one snapshot per call. Called only when capture is enabled.
-
-        weights: (B, L, L) averaged over heads. Token order along the key axis is
-        [image CLS tokens (n_img), force tokens (rest)].
+    def _capture_cross_fusion_attn(self, rgb_tokens, force_tokens):
+        """Stash bi-cross-attention weights (img<-force and force<-img) captured
+        by VizCrossAttention into self._captured_fusion_attn, for the policy to
+        pull via pop_fusion_attention_viz() and pickle alongside the denoiser's
+        attention. No-op (leaves _captured_fusion_attn unset) when capture is off.
         """
-        import os
-        import pickle
-
-        # average over batch and over query tokens → (L,) attention received per key
-        W = weights.float().mean(dim=(0, 1))
-        attn_dict = {
-            "img_obs": W[:n_img].sum().item(),
-            "force_obs": W[n_img:].sum().item(),
-            "per_key": W.cpu().numpy(),
-            "n_img": int(n_img),
+        cross_img_w   = getattr(self.img_cross_attention,   "last_attn_weights", None)
+        cross_force_w = getattr(self.force_cross_attention, "last_attn_weights", None)
+        if cross_img_w is None and cross_force_w is None:
+            return
+        capture = {
+            "kind": "cross",
+            "n_img": int(rgb_tokens.shape[1]),
+            "n_force": int(force_tokens.shape[1]),
         }
-        if not hasattr(self, "_attn_viz_count"):
-            self._attn_viz_count = 0
-        out_dir = getattr(self, "attn_viz_dir", "attn_viz")
-        os.makedirs(out_dir, exist_ok=True)
-        with open(os.path.join(out_dir, f"attn_weights_{self._attn_viz_count}.pkl"), "wb") as f:
-            pickle.dump(attn_dict, f)
-        self._attn_viz_count += 1
+        if cross_img_w is not None:
+            # avg over image queries -> (n_force,): which force timesteps img patches use
+            capture["cross_per_force_step"] = cross_img_w[0].float().cpu().numpy().mean(axis=0)
+            del self.img_cross_attention.last_attn_weights
+        if cross_force_w is not None:
+            # avg over force queries -> (n_img,): which image patches force tokens use
+            capture["cross_per_img_token"] = cross_force_w[0].float().cpu().numpy().mean(axis=0)
+            del self.force_cross_attention.last_attn_weights
+        self._captured_fusion_attn = capture
 
-    def _dump_bidat_attention(self, pool_weights, cross_img_weights, cross_force_weights, n_img, n_force):
-        """Pickle one attention snapshot per call for bi-cross-attention-DAT.
-
-        pool_weights:        (B, 1, n_img+n_force+1) — attn-pool query over all tokens.
-                             Index 0 is the prepended mean token; image tokens follow,
-                             then force tokens: [mean, img_0..img_{n-1}, force_0..force_{m-1}]
-        cross_img_weights:   (B, n_img, n_force) — img←force cross-attention, avg over heads.
-                             None if capture was off for that module.
-        cross_force_weights: (B, n_force, n_img) — force←img cross-attention, avg over heads.
-                             None if capture was off for that module.
-        """
-        import os
-        import pickle
-
-        W_pool = pool_weights[0, 0].float().cpu().numpy()  # (n_img+n_force+1,)
-        img_mass   = float(W_pool[1:1 + n_img].sum())
-        force_mass = float(W_pool[1 + n_img:].sum())
-
-        attn_dict = {
-            "img_obs":        img_mass,
-            "force_obs":      force_mass,
-            "pool_per_token": W_pool,       # full pool weight vector for detailed plots
-            "n_img":          int(n_img),
-            "n_force":        int(n_force),
-            "mode":           self.fuse_mode,
-        }
-        if cross_img_weights is not None:
-            # average over image queries → (n_force,): which force timesteps img patches use
-            attn_dict["cross_per_force_step"] = (
-                cross_img_weights[0].float().cpu().numpy().mean(axis=0)
-            )
-        if cross_force_weights is not None:
-            # average over force queries → (n_img,): which image patches force tokens use
-            attn_dict["cross_per_img_token"] = (
-                cross_force_weights[0].float().cpu().numpy().mean(axis=0)
-            )
-
-        if not hasattr(self, "_attn_viz_count"):
-            self._attn_viz_count = 0
-        out_dir = getattr(self, "attn_viz_dir", "attn_viz")
-        os.makedirs(out_dir, exist_ok=True)
-        with open(os.path.join(out_dir, f"attn_weights_{self._attn_viz_count}.pkl"), "wb") as f:
-            pickle.dump(attn_dict, f)
-        self._attn_viz_count += 1
+    def pop_fusion_attention_viz(self):
+        """Return and clear the fusion attention captured during the last forward()
+        call (None if nothing was captured, i.e. VISUALIZE_ATTENTION was off)."""
+        capture = getattr(self, "_captured_fusion_attn", None)
+        self._captured_fusion_attn = None
+        return capture
 
     @torch.no_grad()
     def output_shape(self):
@@ -582,6 +515,8 @@ class TimmObsEncoderWithForceV1(ModuleAttrMixin):
                 (1, horizon) + shape, dtype=self.dtype, device=self.device
             )
         example_output = self.forward(example_obs_dict)
-        assert len(example_output.shape) == 2
+        assert len(example_output.shape) == 3, (
+            f"Expected 3D output (B, N, D), got shape {example_output.shape}"
+        )
         assert example_output.shape[0] == 1
-        return example_output.shape
+        return example_output.shape  # (1, N, D)

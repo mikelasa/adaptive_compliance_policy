@@ -1,21 +1,18 @@
 defaults:
   - _self_
-  # - task: vase_wiping_conv.yaml
   - task: flip_up_conv.yaml
-  # - task: flip_up_conv_dinoV3.yaml
-  # - task: smiley_single_arm.yaml
   - override hydra/sweeper: optuna
 
-name: ${policy.obs_encoder.fuse_mode}_VIT_400V3_16Nf_${policy.obs_encoder.force_encoder_cfg.type}_clipped_4vidat
+name: ${policy.obs_encoder.fuse_mode}_VIT_transformer_${policy.obs_encoder.force_encoder_cfg.type}
 output_dir: ${oc.env:PYRITE_CHECKPOINT_FOLDERS}
-_target_: diffusion_policy.workspace.train_diffusion_unet_image_workspace.TrainDiffusionUnetImageWorkspace
+_target_: diffusion_policy.workspace.train_diffusion_transformer_image_workspace.TrainDiffusionTransformerImageWorkspace
 
 task_name: ${task.name}
 shape_meta: ${task.shape_meta}
 exp_name: "default"
 
 policy:
-  _target_: diffusion_policy.policy.diffusion_unet_timm_mod1_policy.DiffusionUnetTimmMod1Policy
+  _target_: diffusion_policy.policy.diffusion_transformer_timm_mod1_policy.DiffusionTransformerTimmMod1Policy
 
   shape_meta: ${shape_meta}
 
@@ -28,39 +25,40 @@ policy:
     clip_sample: True
     set_alpha_to_one: True
     steps_offset: 0
-    prediction_type: epsilon # epsilon | sample
+    prediction_type: epsilon
 
   obs_encoder:
-    _target_: diffusion_policy.model.vision.timm_obs_encoder_bi_cross_dat_V2.TimmObsEncoderWithForceV2
+    _target_: diffusion_policy.model.vision.timm_obs_encoder_bi_cross_dat_transformer.TimmObsEncoderBiCrossDATTransformer
     shape_meta: ${shape_meta}
-    fuse_mode: bi-cross-attention-ViDAT  # modality-attention | bi-cross-attention | bi-cross-attention-ViDAT
+    fuse_mode: bi-cross-attention-DAT  # modality-attention | bi-cross-attention | bi-cross-attention-DAT | DAT
+    second_camera: false
     reduce_pretrained_lr: True
-    second_camera: False
-    position_encoding: learnable  # learnable | null
+    position_encoding: learnable
     symbol_retriever: positional  # positional | position_relative | symbolic | relational_symbolic
     symbol_retriever_cfg:
-      symbol_dim: 768  # must match v_feature_dim (d_model of ViDAT)
-      max_rel_pos: 50  # vit_base_patch32: 7x7=49 patches + 1 CLS = 50 tokens per frame
+      symbol_dim: 768  # must match v_feature_dim (ViT-B embed_dim)
+      n_heads: 6
+      n_symbols: 16
     bi_cross_heads: 4
-    n_heads_sa: 4  # sensory attention heads per ViDAT layer (even split recommended)
-    n_heads_ra: 4  # relational attention heads per ViDAT layer (even split recommended)
+    bi_cross_attn_drop: 0.1   # dropout on the cross-attention weights (img<->force)
+    bi_cross_drop: 0.05       # dropout after the cross-attn residual + its FFN
+    n_heads_sa: 8
+    n_heads_ra: 8
     share_attn_params: False
-    symmetric_rels: True  # symmetric relations recommended as starting point (ablate asymmetric)
-    vidat_n_layers: 4  # ViDAT layers on patch tokens before fusion (paper recommends 2–3)
+    dat_n_layers: 4
     dat_dff: 2048
-    dat_activation: gelu  # relu | gelu | silu
-    dat_dropout_rate: 0.0
+    dat_activation: relu
+    dat_dropout_rate: 0.1
     dat_norm_first: True
+    dat_ra_kwargs:
+      symmetric_rels: True
 
     vision_encoder_cfg:
       model_name: 'vit_base_patch32_clip_224.openai'
       pretrained: True
-      frozen: True  # backbone frozen; only ViDAT layers train from scratch
+      frozen: False
       global_pool: ''
-
-      # downsample ratio for image tokens
-      downsample_ratio: 32  # 16 for dinov3 | 32 for vit_base_patch32
-
+      downsample_ratio: 32
       transforms:
         - type: RandomCrop
           ratio: 0.95
@@ -69,40 +67,34 @@ policy:
           contrast: 0.4
           saturation: 0.5
           hue: 0.08
-
       use_group_norm: True
       share_rgb_model: False
 
     force_encoder_cfg:
-      type: fft      # fft | cnn1d
-      feature_dim: 384  # fft: z_dim (output = 2*feature_dim = 768) | cnn1d: hidden_channels (output = feature_dim)
+      type: cnn1d
+      feature_dim: 768  # must match vision encoder embed_dim so tokens are compatible
+      last_n_tokens: 1
       frozen: False
       share_force_model: False
-      # ── cnn1d-only fields (ignored when type: fft) ──────────────────
-      # ft_dim: 6        # wrench input dimension
-      # norm_type: group # group | batch | layer
-      # act: gelu        # gelu | relu
-      # alpha_init: 0.01
 
   num_inference_steps: 16
-  diffusion_step_embed_dim: 32
-  down_dims: [256,512,1024]
-  kernel_size: 5
-  n_groups: 8
-  cond_predict_scale: True
   input_pertub: 0.0684854455525527
-  train_diffusion_n_samples: 1
+  # transformer denoiser architecture
+  n_layer: 8
+  n_head: 8
+  n_emb: 768    # must match vision_encoder_cfg embed_dim and force_encoder_cfg feature_dim
+  p_drop_attn: 0.1
 
 ema:
   _target_: diffusion_policy.model.diffusion.ema_model.EMAModel
   update_after_step: 0
   inv_gamma: 1.0
-  power: 0.7820065419014919
+  power: 0.75
   min_value: 0.0
   max_value: 0.9999
 
 dataloader:
-  batch_size: 128
+  batch_size: 128   # transformers need more memory per sample than UNet — start lower
   num_workers: 32
   shuffle: True
   pin_memory: True
@@ -117,10 +109,10 @@ val_dataloader:
 
 optimizer:
   _target_: torch.optim.AdamW
-  lr: 0.00021031655633456552
-  betas: [0.95, 0.999]
+  lr: 1.0e-4
+  betas: [0.9, 0.95]
   eps: 1.0e-8
-  weight_decay: 9.093294700385743e-05
+  weight_decay: 1.0e-4
 
 training:
   device: "cuda:0"
@@ -130,9 +122,7 @@ training:
   lr_scheduler: cosine
   lr_warmup_steps: 1000
   num_epochs: 150
-
   log_gradient_norm: False
-
   gradient_accumulate_every: 1
   use_ema: True
   freeze_encoder: False
@@ -144,9 +134,8 @@ training:
   max_val_steps: null
   tqdm_interval_sec: 1.0
 
-
 logging:
-  project: Flip_up_setup_mesa_ViDAT
+  project: RACP_TILT
   resume: False
   mode: online
   name: ${now:%Y.%m.%d-%H.%M.%S}_${task_name}_${name}
@@ -170,19 +159,13 @@ multi_run:
 hydra:
   sweeper:
     _target_: hydra_plugins.hydra_optuna_sweeper.optuna_sweeper.OptunaSweeper
-
     direction: minimize
     n_trials: 2
     n_jobs: 1
-
     sampler:
       _target_: optuna.samplers.TPESampler
       seed: 42
-
-    params:
-      #task.dataset_path: "${oc.env:PYRITE_DATASET_FOLDERS}/flip_up_230_original,${oc.env:PYRITE_DATASET_FOLDERS}/flip_up_230"
-      policy.obs_encoder.fuse_mode: choice(bi-cross-attention, bi-cross-attention-ViDAT)
-
+    params: {}
   job:
     override_dirname: ${name}
   run:

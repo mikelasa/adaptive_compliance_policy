@@ -1,12 +1,12 @@
 defaults:
   - _self_
   # - task: vase_wiping_conv.yaml
-  # - task: flip_up_conv.yaml
+  - task: flip_up_conv.yaml
   # - task: flip_up_conv_dinoV3.yaml
-  - task: flip_up_conv_dual_camera.yaml
+  # - task: flip_up_conv_dual_camera.yaml
   - override hydra/sweeper: optuna
 
-name: ${policy.obs_encoder.fuse_mode}_VIT_DCAM_400V3_16Nf_${policy.obs_encoder.force_encoder_cfg.type}_clipped
+name: ${policy.obs_encoder.fuse_mode}_VIT_500k_17f_${policy.obs_encoder.force_encoder_cfg.type}
 output_dir: ${oc.env:PYRITE_CHECKPOINT_FOLDERS}
 _target_: diffusion_policy.workspace.train_diffusion_unet_image_workspace.TrainDiffusionUnetImageWorkspace
 
@@ -35,8 +35,8 @@ policy:
   obs_encoder:
     _target_: diffusion_policy.model.vision.timm_obs_encoder_bi_cross_dat_V1.TimmObsEncoderWithForceV1
     shape_meta: ${shape_meta}
-    fuse_mode: modality-attention #modality-attention | bi-cross-attention |bi-cross-attention-DAT | DAT
-    second_camera: True  # True: dual-camera (secondary encoder = copy of primary) | False: single-camera (original pipeline)
+    fuse_mode: DAT #modality-attention | bi-cross-attention |bi-cross-attention-DAT | DAT
+    second_camera: false  # True: dual-camera (secondary encoder = copy of primary) | False: single-camera (original pipeline)
     reduce_pretrained_lr: True
     position_encoding: learnable #learnable | null
     symbol_retriever: positional # positional | position_relative | symbolic | relational_symbolic
@@ -78,8 +78,8 @@ policy:
       share_rgb_model: False
 
     force_encoder_cfg:
-      type: fft        # fft | cnn1d
-      feature_dim: 384  # 384 for fft, 768 for cnn1d
+      type: cnn1d        # fft | cnn1d
+      feature_dim: 768  # 384 for fft, 768 for cnn1d
       last_n_tokens: 1  # fft only: number of causal output steps to keep as tokens (default 1)
       frozen: False
       share_force_model: False
@@ -109,14 +109,14 @@ ema:
   max_value: 0.9999
 
 dataloader:
-  batch_size: 64
+  batch_size: 128
   num_workers: 32 #32 falla por memoria
   shuffle: True
   pin_memory: True
   persistent_workers: false
 
 val_dataloader:
-  batch_size: 64
+  batch_size: 128
   num_workers: 32
   shuffle: False
   pin_memory: True
@@ -141,7 +141,7 @@ training:
   
   log_gradient_norm: False
 
-  gradient_accumulate_every: 2
+  gradient_accumulate_every: 1
   # EMA destroys performance when used with BatchNorm
   # replace BatchNorm with GroupNorm.
   use_ema: True
@@ -160,7 +160,7 @@ training:
 
 
 logging:
-  project: Flip_up_setup_mesa_V3
+  project: RACP_TILT
   resume: False
   mode: online
   name: ${now:%Y.%m.%d-%H.%M.%S}_${task_name}_${name}
@@ -196,7 +196,7 @@ hydra:
     params: 
       #task.dataset_path: "${oc.env:PYRITE_DATASET_FOLDERS}/flip_up_230_original,${oc.env:PYRITE_DATASET_FOLDERS}/flip_up_230"
       #policy.obs_encoder.fuse_mode: choice(modality-attention, bi-cross-attention, bi-cross-attention-DAT, DAT)
-      policy.obs_encoder.fuse_mode: choice(modality-attention, bi-cross-attention-DAT)
+      #policy.obs_encoder.fuse_mode: choice(modality-attention, bi-cross-attention-DAT)
       
   job:
     override_dirname: ${name}
