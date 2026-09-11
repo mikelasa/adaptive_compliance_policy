@@ -25,7 +25,7 @@ policy:
     clip_sample: True
     set_alpha_to_one: True
     steps_offset: 0
-    prediction_type: epsilon
+    prediction_type: sample
 
   obs_encoder:
     _target_: diffusion_policy.model.vision.timm_obs_encoder_bi_cross_dat_transformer.TimmObsEncoderBiCrossDATTransformer
@@ -84,6 +84,16 @@ policy:
   n_head: 8
   n_emb: 768    # must match vision_encoder_cfg embed_dim and force_encoder_cfg feature_dim
   p_drop_attn: 0.1
+
+curriculum:
+  # FACTR-style force-attending visual curriculum (see
+  # diffusion_policy/model/vision/curriculum.py). Blurs vision input during
+  # training only, decaying to 0 (full detail) by the end of training;
+  # predict_action()/eval() are never affected.
+  space: pixel      # latent (post-ViT tokens) | pixel (raw image, FACTR's own default)
+  scheduler: "cos"  # no | const | linear | cos | exp | step -- must stay quoted: bare `no`/`off`/`yes`/`on` parse as YAML booleans
+  start_scale: 4.0   # Gaussian sigma at the start of the decay
+  end_scale: 0.0
 
 ema:
   _target_: diffusion_policy.model.diffusion.ema_model.EMAModel

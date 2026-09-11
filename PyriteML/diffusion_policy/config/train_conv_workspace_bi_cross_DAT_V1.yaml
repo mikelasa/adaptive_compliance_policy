@@ -30,12 +30,12 @@ policy:
     clip_sample: True
     set_alpha_to_one: True
     steps_offset: 0
-    prediction_type: epsilon # epsilon | sample
+    prediction_type: sample # epsilon | sample
 
   obs_encoder:
     _target_: diffusion_policy.model.vision.timm_obs_encoder_bi_cross_dat_V1.TimmObsEncoderWithForceV1
     shape_meta: ${shape_meta}
-    fuse_mode: DAT #modality-attention | bi-cross-attention |bi-cross-attention-DAT | DAT
+    fuse_mode: bi-cross-attention-DAT #modality-attention | bi-cross-attention |bi-cross-attention-DAT | DAT
     second_camera: false  # True: dual-camera (secondary encoder = copy of primary) | False: single-camera (original pipeline)
     reduce_pretrained_lr: True
     position_encoding: learnable #learnable | null
@@ -51,7 +51,7 @@ policy:
     dat_n_layers: 4  # number of stacked DualAttnEncoderBlock layers
     dat_dff: 2048
     dat_activation: relu # relu | gelu | silu
-    dat_dropout_rate: 0.0
+    dat_dropout_rate: 0.1
     dat_norm_first: True
     dat_ra_kwargs: # additional kwargs for the relational attention in the DAT encoder, e.g. to control whether to use symmetric relations
       symmetric_rels: True # enable relations, default False

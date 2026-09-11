@@ -117,6 +117,17 @@ class DiffusionTransformerTimmMod1Policy(BaseImagePolicy):
         nobs_sparse = self.sparse_normalizer.normalize(obs_dict_sparse)
         B = next(iter(nobs_sparse.values())).shape[0]
 
+        # raw (unnormalized) wrench magnitude at the most recent timestep, for the
+        # attention-viz force subplot only — has no effect on the policy itself.
+        wrench_norm = None
+        wrench_keys = getattr(self.obs_encoder, "wrench_keys", [])
+        if wrench_keys:
+            key = wrench_keys[0]
+            # (B, T, 6) -> most recent timestep, batch 0 -> scalar L2 norm
+            wrench_norm = float(
+                torch.linalg.norm(obs_dict_sparse[key][0, -1].float()).item()
+            )
+
         obs_tokens = self.obs_encoder(nobs_sparse)  # (B, N, n_emb)
         enc_capture = None
         if hasattr(self.obs_encoder, "pop_fusion_attention_viz"):
@@ -139,21 +150,30 @@ class DiffusionTransformerTimmMod1Policy(BaseImagePolicy):
         if hasattr(self.model, "pop_attention_viz_capture"):
             dec_capture = self.model.pop_attention_viz_capture()
         if enc_capture is not None or dec_capture is not None:
-            self._dump_attention_viz(enc_capture, dec_capture)
+            self._dump_attention_viz(enc_capture, dec_capture, wrench_norm)
 
         assert nsample.shape == (B, self.action_horizon, self.action_dim)
         action_pred = self.sparse_normalizer["action"].unnormalize(nsample)
 
         return {"sparse": action_pred}
 
-    def _dump_attention_viz(self, enc_capture, dec_capture):
+    def _dump_attention_viz(self, enc_capture, dec_capture, wrench_norm=None):
         """Pickle one combined attention snapshot per predict_action() call:
         the encoder-side bi-cross-attention (img<->force, or self-attention for
         modality-attention, or None for plain DAT) plus the denoiser-side
         cross-attention (action-horizon queries -> obs tokens + timestep token,
-        averaged over denoising steps). Mirrors the pooled-encoder dump format
-        in timm_obs_encoder_bi_cross_dat_V1.py but with arch="transformer_dp"
-        and no attn-pool fields, since this pipeline has no pooling step.
+        captured at the first decoder layer on the last denoising step only —
+        matches ImplicitRDP's Fig. 7 methodology, see
+        TransformerForActionDiffusion.pop_attention_viz_capture()), plus the raw
+        wrench magnitude at the current control step (for the force subplot in
+        plot_force_attn_correlation.py; has no bearing on the policy itself).
+        Also records the [image][force][low_dim] token-count split of
+        denoiser_cross_per_cond_token so a plotting script can sum attention
+        mass per modality without hardcoding indices (cf. ImplicitRDP's fixed
+        slice indices in transformer_for_diffusion.py). Mirrors the
+        pooled-encoder dump format in timm_obs_encoder_bi_cross_dat_V1.py but
+        with arch="transformer_dp" and no attn-pool fields, since this pipeline
+        has no pooling step.
         """
         import os
         import pickle
@@ -163,6 +183,10 @@ class DiffusionTransformerTimmMod1Policy(BaseImagePolicy):
             "mode": self.obs_encoder.fuse_mode,
             "encoder": enc_capture,                        # see pop_fusion_attention_viz()
             "denoiser_cross_per_cond_token": dec_capture,   # see pop_attention_viz_capture()
+            "n_img_tokens": getattr(self.obs_encoder, "n_img_tokens", None),
+            "n_force_tokens": getattr(self.obs_encoder, "n_force_tokens", None),
+            "n_lowdim_tokens": getattr(self.obs_encoder, "n_lowdim_tokens", None),
+            "wrench_norm": wrench_norm,
         }
         if not hasattr(self, "_attn_viz_count"):
             self._attn_viz_count = 0

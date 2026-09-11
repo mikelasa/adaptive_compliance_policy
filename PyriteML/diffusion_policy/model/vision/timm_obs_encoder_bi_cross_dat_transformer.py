@@ -19,6 +19,7 @@ from multimodal_representation.multimodal.models.base_models.encoders import (
     ForceEncoder,
 )
 from diffusion_policy.model.vision.ft_embed import FTEmbed
+from diffusion_policy.model.vision.curriculum import gaussian_1d_smoothing, gaussian_2d_smoothing
 
 from dual_attention.dual_attn_blocks import DualAttnEncoderBlock
 from dual_attention.symbol_retrieval import (
@@ -210,6 +211,18 @@ class TimmObsEncoderBiCrossDATTransformer(ModuleAttrMixin):
         self.force_encoder_cfg = force_encoder_cfg
         self.shape_meta = shape_meta
         self.fuse_mode = fuse_mode
+        # FACTR-style visual curriculum (see model/vision/curriculum.py): the
+        # training loop sets curriculum_scale to a decaying Gaussian-blur scale
+        # each step (see TrainDiffusionTransformerImageWorkspace.run()); 0.0 is
+        # a no-op, so eval()/predict_action() see full-detail vision unless
+        # something explicitly sets this attribute during eval too.
+        # curriculum_space picks where the blur is applied:
+        #   "latent" – smooths each ViT output token along its feature dim,
+        #              after the backbone, before fusion (any fuse_mode).
+        #   "pixel"  – blurs the raw image before the ViT even sees it, i.e.
+        #              FACTR's own default / what their reported results use.
+        self.curriculum_scale = 0.0
+        self.curriculum_space = "latent"
         self.key_model_map = key_model_map
         self.key_transform_map = key_transform_map
         self.rgb_keys = rgb_keys
@@ -245,6 +258,11 @@ class TimmObsEncoderBiCrossDATTransformer(ModuleAttrMixin):
                 self.position_embedding = torch.nn.Parameter(
                     torch.randn(n_features, self.v_feature_dim)
                 )
+            # token-layout metadata (diagnostics only; no effect on forward()).
+            # forward() concatenates [rgb_tokens][force_tokens], one CLS token
+            # per frame each, then appends low_dim tokens at the very end.
+            self.n_img_tokens = len(rgb_keys) * rgb_horizon
+            self.n_force_tokens = len(wrench_keys) * self.fft_last_n_tokens
 
         if self.fuse_mode in ("bi-cross-attention", "bi-cross-attention-DAT", "DAT"):
             n_patches = (
@@ -285,6 +303,12 @@ class TimmObsEncoderBiCrossDATTransformer(ModuleAttrMixin):
             # total_tokens is the fused sequence length before low_dim tokens are appended
             total_tokens = len(rgb_keys) * rgb_horizon * tokens_per_frame + n_force_tokens
             self.total_tokens = total_tokens
+            # token-layout metadata (diagnostics only; no effect on forward()).
+            # forward() concatenates [img_enhanced/rgb_tokens][force_enhanced/force_tokens]
+            # in this order for all three of bi-cross-attention, bi-cross-attention-DAT
+            # and DAT, then appends low_dim tokens at the very end.
+            self.n_img_tokens = len(rgb_keys) * rgb_horizon * tokens_per_frame
+            self.n_force_tokens = n_force_tokens
 
         if self.fuse_mode in ("bi-cross-attention-DAT", "DAT"):
             symbol_dim = self.symbol_retriever_cfg.symbol_dim
@@ -333,6 +357,14 @@ class TimmObsEncoderBiCrossDATTransformer(ModuleAttrMixin):
                 for _ in range(dat_n_layers)
             ])
 
+        # token-layout metadata (diagnostics only; no effect on forward()): count
+        # of low_dim (non-rgb, non-wrench) tokens appended at the end of the
+        # fused sequence in every fuse_mode, one token per horizon step per key.
+        sample_obs_meta = shape_meta["sample"]["obs"]["sparse"]
+        self.n_lowdim_tokens = sum(
+            sample_obs_meta[key]["horizon"] for key in low_dim_keys
+        )
+
         logger.info(
             "number of parameters: %e", sum(p.numel() for p in self.parameters())
         )
@@ -360,6 +392,12 @@ class TimmObsEncoderBiCrossDATTransformer(ModuleAttrMixin):
             img = img.reshape(B * T, *img.shape[2:])
             img = self.key_transform_map[key](img)
 
+            # force-attending visual curriculum, pixel-space variant: degrade
+            # the image before the (trainable) ViT ever sees it, so the whole
+            # backbone's gradients are affected, not just the final tokens.
+            if self.training and self.curriculum_scale > 0 and self.curriculum_space == "pixel":
+                img = gaussian_2d_smoothing(img, self.curriculum_scale)
+
             if self.vision_encoder_cfg.frozen:
                 with torch.no_grad():
                     raw_feature = self.key_model_map[key](img)
@@ -379,6 +417,13 @@ class TimmObsEncoderBiCrossDATTransformer(ModuleAttrMixin):
                 rgb_features.append(feature)
 
         rgb_tokens = torch.cat(rgb_features, dim=1)
+
+        # ── force-attending visual curriculum, latent-space variant (train-only,
+        # all fuse_modes) ────────────────────────────────────────────────────
+        # Blurs each vision token's own feature vector; force_tokens below are
+        # never touched. See model/vision/curriculum.py.
+        if self.training and self.curriculum_scale > 0 and self.curriculum_space == "latent":
+            rgb_tokens = gaussian_1d_smoothing(rgb_tokens, self.curriculum_scale)
 
         # ── wrench ────────────────────────────────────────────────────────────
         for key in self.wrench_keys:

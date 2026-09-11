@@ -29,6 +29,7 @@ from diffusion_policy.common.pytorch_util import dict_apply, optimizer_to
 from diffusion_policy.dataset.base_dataset import BaseDataset, BaseImageDataset
 from diffusion_policy.model.common.lr_scheduler import get_scheduler
 from diffusion_policy.model.diffusion.ema_model import EMAModel
+from diffusion_policy.model.vision.curriculum import get_scale as get_curriculum_scale
 from diffusion_policy.policy.diffusion_transformer_timm_mod1_policy import DiffusionTransformerTimmMod1Policy
 from diffusion_policy.workspace.base_workspace import BaseWorkspace
 
@@ -158,6 +159,15 @@ class TrainDiffusionTransformerImageWorkspace(BaseWorkspace):
         if cfg.training.use_ema:
             self.ema_model.set_normalizer(sparse_normalizer)
 
+        # force-attending visual curriculum: total step count the blur schedule
+        # decays over (see model/vision/curriculum.py). Hardcoded for this first
+        # pass, not yet exposed in the yaml — see docstring on get_curriculum_scale.
+        curriculum_max_step = len(train_dataloader) * cfg.training.num_epochs
+        curriculum_scheduler = cfg.curriculum.scheduler
+        curriculum_start_scale = cfg.curriculum.start_scale
+        curriculum_end_scale = cfg.curriculum.end_scale
+        self.model.obs_encoder.curriculum_space = cfg.curriculum.space
+
         # configure lr scheduler
         lr_scheduler = get_scheduler(
             cfg.training.lr_scheduler,
@@ -239,6 +249,15 @@ class TrainDiffusionTransformerImageWorkspace(BaseWorkspace):
                         ):
                             train_sampling_batch = batch
 
+                        curriculum_scale = get_curriculum_scale(
+                            scheduler=curriculum_scheduler,
+                            start=curriculum_start_scale,
+                            end=curriculum_end_scale,
+                            cur_step=self.global_step,
+                            max_step=curriculum_max_step,
+                        )
+                        self.model.obs_encoder.curriculum_scale = curriculum_scale
+
                         raw_loss = self.model(batch)
                         accelerator.backward(raw_loss)
 
@@ -272,6 +291,7 @@ class TrainDiffusionTransformerImageWorkspace(BaseWorkspace):
                             "global_step": self.global_step,
                             "epoch": self.epoch,
                             "lr": lr_scheduler.get_last_lr()[0],
+                            "curriculum_scale": curriculum_scale,
                         }
 
                         is_last_batch = batch_idx == (len(train_dataloader) - 1)

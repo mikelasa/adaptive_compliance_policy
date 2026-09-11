@@ -64,9 +64,13 @@ class TransformerForActionDiffusion(ModuleAttrMixin):
             persistent=False,
         )
 
-        # attention-viz capture: one entry per denoising step accumulated during a
-        # single conditional_sample() call, consumed by pop_attention_viz_capture().
-        self._captured_cross_attn_steps = []
+        # attention-viz capture: a single snapshot (first decoder layer, last
+        # denoising step only), overwritten on every forward() call during a
+        # conditional_sample() loop so that whatever is left when the loop ends
+        # is the final-step snapshot. Matches ImplicitRDP's Fig. 7 methodology
+        # (transformer_for_diffusion.py: `layer == 0 and timestep.item() == 0`).
+        # Consumed by pop_attention_viz_capture().
+        self._captured_cross_attn_snapshot = None
 
         # init
         self.apply(self._init_weights)
@@ -242,42 +246,50 @@ class TransformerForActionDiffusion(ModuleAttrMixin):
         # (B, T, n_out)
 
         # attention visualization (inference only; no-op when disabled). Only
-        # captured outside training to avoid unboundedly growing the per-step
-        # accumulation list across an entire training run.
+        # captured outside training. Reads the FIRST decoder layer (matches
+        # ImplicitRDP's `layer == 0`) and unconditionally overwrites the
+        # snapshot on every forward() call — since conditional_sample() calls
+        # forward() once per denoising step in order, whatever remains after
+        # the loop ends is exactly the last (final) denoising step's snapshot,
+        # matching ImplicitRDP's `timestep.item() == 0` gate without depending
+        # on the scheduler's last timestep value actually being 0.
         if not self.training:
-            last_layer = self.decoder.layers[-1]
-            if hasattr(last_layer, "last_attn_weights"):
+            first_layer = self.decoder.layers[0]
+            if hasattr(first_layer, "last_attn_weights"):
                 # (B, T_action, tc) averaged over heads -> keep batch 0 on CPU
-                self._captured_cross_attn_steps.append(
-                    last_layer.last_attn_weights[0].float().cpu()
+                self._captured_cross_attn_snapshot = (
+                    first_layer.last_attn_weights[0].float().cpu()
                 )
-                del last_layer.last_attn_weights
+                del first_layer.last_attn_weights
 
         return x
 
     def reset_attention_viz_capture(self):
-        """Clear any cross-attention weights accumulated so far. Call before
+        """Clear any cross-attention snapshot captured so far. Call before
         starting a fresh conditional_sample() loop so a previous (possibly
         aborted) run can't leak into the next capture."""
-        self._captured_cross_attn_steps = []
+        self._captured_cross_attn_snapshot = None
 
     def pop_attention_viz_capture(self):
-        """Average the cross-attention weights captured across every denoising
-        step of the last conditional_sample() call into a single per-cond-token
-        vector, and clear the internal buffer.
+        """Return the cross-attention snapshot from the last denoising step of
+        the last conditional_sample() call, averaged over the action-horizon
+        queries, and clear the internal buffer.
+
+        Snapshot is taken at the FIRST decoder layer and ONLY the LAST
+        denoising step (see forward()) — matching ImplicitRDP's Fig. 7
+        measurement methodology exactly, so results are directly comparable.
 
         Returns:
-            np.ndarray of shape (n_cond_tokens,) — average attention mass each
-            cond token (obs tokens..., then the trailing diffusion-timestep
-            token) received from action-horizon queries, averaged over both the
-            action-horizon queries and the denoising steps. None if nothing was
+            np.ndarray of shape (n_cond_tokens,) — attention mass each cond
+            token (obs tokens..., then the trailing diffusion-timestep token)
+            received from action-horizon queries at the final denoising step,
+            averaged over the action-horizon queries only. None if nothing was
             captured (VISUALIZE_ATTENTION was off, or this ran in training mode).
         """
-        if not self._captured_cross_attn_steps:
+        if self._captured_cross_attn_snapshot is None:
             return None
-        # (n_denoise_steps, T_action, tc) -> (tc,)
-        stacked = torch.stack(self._captured_cross_attn_steps, dim=0)
-        avg = stacked.mean(dim=(0, 1)).numpy()
-        self._captured_cross_attn_steps = []
+        # (T_action, tc) -> (tc,)
+        avg = self._captured_cross_attn_snapshot.mean(dim=0).numpy()
+        self._captured_cross_attn_snapshot = None
         return avg
 

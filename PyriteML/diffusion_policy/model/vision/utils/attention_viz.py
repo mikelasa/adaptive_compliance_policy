@@ -30,7 +30,6 @@ from .attention_pool import AttentionPool1d
 # Flip to True ONLY in inference/eval scripts. Leave False for training.
 VISUALIZE_ATTENTION = True
 
-
 class VizTransformerEncoderLayer(nn.TransformerEncoderLayer):
     """Drop-in replacement for nn.TransformerEncoderLayer that captures the
     averaged self-attention weight matrix into ``self.last_attn_weights``
