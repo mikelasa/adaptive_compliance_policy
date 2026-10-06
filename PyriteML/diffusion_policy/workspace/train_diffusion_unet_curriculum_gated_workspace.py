@@ -42,12 +42,12 @@ OmegaConf.register_new_resolver("eval", eval, replace=True)
 
 class TrainDiffusionUnetCurriculumGatedWorkspace(TrainDiffusionUnetImageWorkspace):
     """
-    TrainDiffusionUnetImageWorkspace + force-attending visual curriculum and
-    modality-dropout scheduling for TimmObsEncoderWithForceCurriculumGated.
+    TrainDiffusionUnetImageWorkspace + force-attending visual curriculum
+    scheduling for TimmObsEncoderWithForceCurriculumGated.
     __init__ is inherited unchanged (it instantiates the policy generically
     from cfg.policy, so it already works with the new curriculum-gated
     policy/encoder). Only run() is overridden, ported line-for-line from the
-    base class with the curriculum/dropout wiring added -- see
+    base class with the curriculum wiring added -- see
     train_diffusion_transformer_image_workspace.py's run() for the RACP-side
     twin of this same wiring. Kept as a full copy rather than editing
     TrainDiffusionUnetImageWorkspace in place, since that workspace is
@@ -112,27 +112,6 @@ class TrainDiffusionUnetCurriculumGatedWorkspace(TrainDiffusionUnetImageWorkspac
         curriculum_start_scale = cfg.curriculum.start_scale
         curriculum_end_scale = cfg.curriculum.end_scale
         self.model.obs_encoder.curriculum_space = cfg.curriculum.space
-
-        # modality dropout (train-only; see img_dropout_p/force_dropout_p on
-        # the obs_encoder) -- kept mutually exclusive with the visual
-        # curriculum above: both change what the encoder sees during
-        # training, so running them together would confound which one is
-        # responsible for any behavior change. Static for the whole run
-        # (no schedule, unlike curriculum_scale), enforced exclusive here.
-        modality_dropout_enabled = (
-            cfg.modality_dropout.img_p > 0 or cfg.modality_dropout.force_p > 0
-        )
-        if modality_dropout_enabled and curriculum_scheduler != "no":
-            raise ValueError(
-                "cfg.modality_dropout.{img_p,force_p} > 0 and "
-                f"cfg.curriculum.scheduler != 'no' (got {curriculum_scheduler!r}) -- "
-                "these two training-time regularizers are kept mutually exclusive "
-                "so each experiment's effect stays attributable to one mechanism. "
-                'Set curriculum.scheduler: "no" to run with modality dropout only, '
-                "or modality_dropout.{img_p,force_p}: 0.0 to run with curriculum only."
-            )
-        self.model.obs_encoder.img_dropout_p = cfg.modality_dropout.img_p
-        self.model.obs_encoder.force_dropout_p = cfg.modality_dropout.force_p
 
         # configure lr scheduler
         lr_scheduler = get_scheduler(

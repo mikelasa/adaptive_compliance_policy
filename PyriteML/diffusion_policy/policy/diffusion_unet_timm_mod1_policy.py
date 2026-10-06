@@ -20,15 +20,6 @@ from diffusion_policy.model.diffusion.mask_generator import LowdimMaskGenerator
 from diffusion_policy.model.vision.timm_obs_encoder_with_force import (
     TimmObsEncoderWithForce,
 )
-#CHANGE
-from diffusion_policy.model.vision.timm_obs_encoder_bi_cross_dat_V1 import (
-    TimmObsEncoderWithForceV1,
-)
-
-from diffusion_policy.model.vision.timm_obs_encoder_bi_cross_dat_V2 import (
-    TimmObsEncoderWithForceV2,
-)
-
 from diffusion_policy.common.pytorch_util import dict_apply
 
 from PyriteUtility.data_pipeline.data_plotting import plot_ts_action

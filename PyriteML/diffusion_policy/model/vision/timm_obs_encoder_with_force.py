@@ -11,7 +11,6 @@ import logging
 from diffusion_policy.model.common.module_attr_mixin import ModuleAttrMixin
 from diffusion_policy.common.pytorch_util import replace_submodules
 
-# from diffusion_policy.model.vision.force_spec_encoder import ForceSpecEncoder, convert_to_spec
 from multimodal_representation.multimodal.models.base_models.encoders import (
     ForceEncoder,
     ProprioEncoder,

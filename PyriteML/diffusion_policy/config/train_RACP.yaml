@@ -60,13 +60,13 @@ policy:
       symmetric_rels: True
 
     # Contact gate (see contact_gate_enabled on the obs_encoder). Constructor
-    # arg, not a runtime-settable one like curriculum/modality_dropout below
+    # arg, not a runtime-settable one like curriculum below
     # -- it decides whether the model even HAS the learnable no-contact
     # placeholder parameter, so old checkpoints (enabled=False, no such
     # parameter) keep loading with strict=True. Runs at train AND eval
-    # (unlike curriculum/modality_dropout) -- part of the deployed policy.
-    # For a clean first experiment, keep curriculum.scheduler: "no" and
-    # modality_dropout.{img_p,force_p}: 0.0 while this is enabled.
+    # (unlike curriculum) -- part of the deployed policy.
+    # For a clean first experiment, keep curriculum.scheduler: "no"
+    # while this is enabled.
     # v4: Schmitt-trigger hysteresis scanned over the observed wrench window
     # (opens above contact_gate_threshold_high, closes below
     # contact_gate_threshold, holds state in between -- see forward() in
@@ -125,23 +125,10 @@ curriculum:
   # diffusion_policy/model/vision/curriculum.py). Blurs vision input during
   # training only, decaying to 0 (full detail) by the end of training;
   # predict_action()/eval() are never affected.
-  # Mutually exclusive with modality_dropout below (see the workspace's
-  # run() guard) -- must be "no" to train with modality dropout instead.
   space: pixel      # latent (post-ViT tokens) | pixel (raw image, FACTR's own default)
   scheduler: "no"   # no | const | linear | cos | exp | step -- must stay quoted: bare `no`/`off`/`yes`/`on` parse as YAML booleans
   start_scale: 4.0   # Gaussian sigma at the start of the decay
   end_scale: 0.0
-
-modality_dropout:
-  # Bidirectional modality dropout (train-only; see img_dropout_p/force_dropout_p
-  # on TimmObsEncoderBiCrossDATTransformer). Independently zeroes the whole image
-  # sequence or the whole wrench sequence (never both) for a fraction of training
-  # samples each step, forcing the network into a decisive, contingent reliance
-  # on each modality rather than a soft always-blend. Static for the whole run,
-  # no schedule. Mutually exclusive with curriculum above -- curriculum.scheduler
-  # must be "no" for these to take effect (enforced in the workspace's run()).
-  img_p: 0.0
-  force_p: 0.0
 
 ema:
   _target_: diffusion_policy.model.diffusion.ema_model.EMAModel

@@ -7,8 +7,8 @@ from diffusion_policy.model.vision.curriculum import gaussian_2d_smoothing
 
 class TimmObsEncoderWithForceCurriculumGated(TimmObsEncoderWithForce):
     """
-    TimmObsEncoderWithForce + pixel-space force-attending visual curriculum,
-    modality dropout, and the Schmitt-trigger contact gate -- ported from
+    TimmObsEncoderWithForce + pixel-space force-attending visual curriculum
+    and the Schmitt-trigger contact gate -- ported from
     TimmObsEncoderBiCrossDATTransformer (see that file for the full design
     rationale in comments). Kept as a separate subclass rather than editing
     TimmObsEncoderWithForce in place, since that class is shared by several
@@ -46,8 +46,6 @@ class TimmObsEncoderWithForceCurriculumGated(TimmObsEncoderWithForce):
         # set by the training workspace loop, train-only, no-op at eval
         self.curriculum_scale = 0.0
         self.curriculum_space = "pixel"
-        self.img_dropout_p = 0.0
-        self.force_dropout_p = 0.0
 
         # constructor arg, not runtime-settable: decides whether the model
         # even has the learnable no-contact placeholder parameter, so it
@@ -77,23 +75,12 @@ class TimmObsEncoderWithForceCurriculumGated(TimmObsEncoderWithForce):
         low_dim_features = list()
         batch_size = next(iter(obs_dict.values())).shape[0]
 
-        # ── modality dropout (train-only) ───────────────────────────────────
-        drop_img = torch.zeros(batch_size, dtype=torch.bool, device=self.device)
-        drop_force = torch.zeros(batch_size, dtype=torch.bool, device=self.device)
-        if self.training and (self.img_dropout_p > 0 or self.force_dropout_p > 0):
-            drop_img = torch.rand(batch_size, device=self.device) < self.img_dropout_p
-            drop_force = torch.rand(batch_size, device=self.device) < self.force_dropout_p
-            drop_force = drop_force & ~drop_img  # never drop both for the same sample
-
         # process rgb input
         for key in self.rgb_keys:
             img = obs_dict[key]
             B, T = img.shape[:2]
             assert B == batch_size
             assert img.shape[2:] == self.key_shape_map[key]
-            if drop_img.any():
-                img = img.clone()
-                img[drop_img] = 0.0
             img = img.reshape(B * T, *img.shape[2:])
             img = self.key_transform_map[key](img)
 
@@ -143,10 +130,6 @@ class TimmObsEncoderWithForceCurriculumGated(TimmObsEncoderWithForce):
                     state = torch.where(opens, torch.ones_like(state), state)
                     state = torch.where(closes, torch.zeros_like(state), state)
                 alpha = state  # (B,) gate value at the most recent timestep
-
-            if drop_force.any():
-                data = data.clone()
-                data[drop_force] = 0.0
 
             data = data.permute(0, 2, 1)
             feature = self.key_model_map[key](data.float())[:, :, 0]

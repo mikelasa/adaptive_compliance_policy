@@ -227,17 +227,6 @@ class TimmObsEncoderBiCrossDATTransformer(ModuleAttrMixin):
         #              FACTR's own default / what their reported results use.
         self.curriculum_scale = 0.0
         self.curriculum_space = "latent"
-        # Modality dropout (train-only, no-op by default): independently zero
-        # out an entire modality's raw input (all T frames/timesteps at once,
-        # per batch sample) for a fraction of training steps, forcing the
-        # network to learn a decisive, contingent reliance on each modality
-        # rather than a soft always-blend of both. Unlike curriculum_scale
-        # above (which gradually degrades vision over training), this drops
-        # a whole modality outright -- set externally by the training
-        # loop/config, same convention as curriculum_scale. No-op at eval
-        # (gated on self.training) and no-op by default (both start at 0.0).
-        self.img_dropout_p = 0.0
-        self.force_dropout_p = 0.0
         # Contact gate (paper: "Learning When to See and When to Feel", Eq. 1).
         # v4: Schmitt-trigger hysteresis scanned over the observed wrench
         # window (contact_gate_threshold_high to open, contact_gate_threshold
@@ -456,23 +445,11 @@ class TimmObsEncoderBiCrossDATTransformer(ModuleAttrMixin):
         low_dim_tokens = []
         batch_size = next(iter(obs_dict.values())).shape[0]
 
-        # ── modality dropout (train-only; see img_dropout_p/force_dropout_p
-        # in __init__) ───────────────────────────────────────────────────────
-        drop_img = torch.zeros(batch_size, dtype=torch.bool, device=self.device)
-        drop_force = torch.zeros(batch_size, dtype=torch.bool, device=self.device)
-        if self.training and (self.img_dropout_p > 0 or self.force_dropout_p > 0):
-            drop_img = torch.rand(batch_size, device=self.device) < self.img_dropout_p
-            drop_force = torch.rand(batch_size, device=self.device) < self.force_dropout_p
-            drop_force = drop_force & ~drop_img  # never drop both for the same sample
-
         # ── rgb ───────────────────────────────────────────────────────────────
         for key in self.rgb_keys:
             img = obs_dict[key]  # (B, T, C, H, W)
             B, T = img.shape[:2]
             assert B == batch_size
-            if drop_img.any():
-                img = img.clone()
-                img[drop_img] = 0.0
             img = img.reshape(B * T, *img.shape[2:])
             img = self.key_transform_map[key](img)
 
@@ -516,8 +493,7 @@ class TimmObsEncoderBiCrossDATTransformer(ModuleAttrMixin):
             assert B == batch_size
 
             # ── contact gate (train + eval; see contact_gate_enabled in
-            # __init__). Computed before modality dropout below, so the two
-            # mechanisms never see each other.
+            # __init__).
             # v4: Schmitt-trigger hysteresis, scanned sequentially across the
             # T steps of the already-observed wrench window (sparse_obs_wrench_horizon,
             # e.g. 32 steps -- real history, not extra data). No state is
@@ -564,9 +540,6 @@ class TimmObsEncoderBiCrossDATTransformer(ModuleAttrMixin):
                     state = torch.where(closes, torch.zeros_like(state), state)
                 alpha = state  # (B,) gate value at the most recent timestep
 
-            if drop_force.any():
-                data = data.clone()
-                data[drop_force] = 0.0
             if self.force_encoder_type == "fft":
                 data = data.permute(0, 2, 1)
                 feature = self.key_model_map[key](data.float())
