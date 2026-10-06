@@ -61,6 +61,24 @@ class DiffusionTransformerTimmMod1Policy(BaseImagePolicy):
         self.model = model
         self.noise_scheduler = noise_scheduler
         self.sparse_normalizer = LinearNormalizer()
+        # Wire the (still-unfit) normalizer into the obs_encoder's contact
+        # gate, if enabled -- stores a reference, not a snapshot, so it stays
+        # correct however self.sparse_normalizer later gets populated:
+        # set_normalizer() during training, or a direct state_dict load at
+        # inference (model_io.py's load_policy(), which never calls
+        # set_normalizer() -- it restores the whole model's state_dict in
+        # one shot). See set_wrench_normalizer() in
+        # TimmObsEncoderBiCrossDATTransformer for why a reference survives
+        # that (params_dict gets reassigned wholesale on every load, not
+        # mutated in place -- a pre-extracted single-field snapshot taken
+        # here would go stale, but re-indexing this object at forward() time
+        # never does).
+        if getattr(self.obs_encoder, "contact_gate_enabled", False) and hasattr(
+            self.obs_encoder, "set_wrench_normalizer"
+        ):
+            wrench_keys = getattr(self.obs_encoder, "wrench_keys", [])
+            if wrench_keys:
+                self.obs_encoder.set_wrench_normalizer(self.sparse_normalizer, wrench_keys[0])
         self.action_dim = action_dim
         self.action_horizon = action_horizon
         self.input_pertub = input_pertub

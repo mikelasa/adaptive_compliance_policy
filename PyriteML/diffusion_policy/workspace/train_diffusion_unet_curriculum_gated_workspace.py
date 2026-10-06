@@ -8,114 +8,59 @@ sys.path.append(ROOT_DIR)
 if __name__ == "__main__":
     os.chdir(ROOT_DIR)
 
-import copy
-import logging
-import pickle
-import random
-
+import os
 import hydra
-import numpy as np
 import torch
-import tqdm
-import wandb
-from accelerate import Accelerator
-from accelerate.utils import DistributedDataParallelKwargs
 from omegaconf import OmegaConf
+import pathlib
 from torch.utils.data import DataLoader
-
+import copy
+import random
+import wandb
+import pickle
+import tqdm
+import numpy as np
+import shutil
+from diffusion_policy.workspace.base_workspace import BaseWorkspace
+from diffusion_policy.workspace.train_diffusion_unet_image_workspace import (
+    TrainDiffusionUnetImageWorkspace,
+)
+from diffusion_policy.policy.diffusion_unet_timm_mod1_curriculum_gated_policy import (
+    DiffusionUnetTimmMod1CurriculumGatedPolicy,
+)
+from diffusion_policy.dataset.base_dataset import BaseImageDataset, BaseDataset
 from diffusion_policy.common.checkpoint_util import TopKCheckpointManager
 from diffusion_policy.common.json_logger import JsonLogger
 from diffusion_policy.common.pytorch_util import dict_apply, optimizer_to
-from diffusion_policy.dataset.base_dataset import BaseDataset, BaseImageDataset
-from diffusion_policy.model.common.lr_scheduler import get_scheduler
 from diffusion_policy.model.diffusion.ema_model import EMAModel
+from diffusion_policy.model.common.lr_scheduler import get_scheduler
 from diffusion_policy.model.vision.curriculum import get_scale as get_curriculum_scale
-from diffusion_policy.policy.diffusion_transformer_timm_mod1_policy import DiffusionTransformerTimmMod1Policy
-from diffusion_policy.workspace.base_workspace import BaseWorkspace
-
-logger = logging.getLogger(__name__)
+from accelerate import Accelerator
 
 OmegaConf.register_new_resolver("eval", eval, replace=True)
 
 
-class TrainDiffusionTransformerImageWorkspace(BaseWorkspace):
-    include_keys = ["global_step", "epoch"]
-    exclude_keys = tuple()
-
-    def __init__(self, cfg: OmegaConf, output_dir=None):
-        super().__init__(cfg, output_dir=output_dir)
-
-        # set seed
-        seed = cfg.training.seed
-        torch.manual_seed(seed)
-        np.random.seed(seed)
-        random.seed(seed)
-
-        # configure model
-        self.model: DiffusionTransformerTimmMod1Policy = hydra.utils.instantiate(cfg.policy)
-
-        self.ema_model: DiffusionTransformerTimmMod1Policy = None
-        if cfg.training.use_ema:
-            self.ema_model = copy.deepcopy(self.model)
-
-        # ── optimizer param groups ────────────────────────────────────────────
-        # Three groups so that all parameters are actually optimized:
-        #   1. transformer denoiser — full LR
-        #   2. pretrained vision backbone — reduced LR (it is already pretrained)
-        #   3. everything else in obs_encoder (force enc, cross-attn, DAT, …) — full LR
-        obs_encoder_lr = cfg.optimizer.lr
-        if cfg.policy.obs_encoder["reduce_pretrained_lr"]:
-            obs_encoder_lr *= 0.1
-            logger.info("==> reduce pretrained obs_encoder lr to %.2e", obs_encoder_lr)
-
-        pretrained_param_ids = set()
-        pretrained_params = []
-        logger.info("==> rgb keys: %s", self.model.obs_encoder.rgb_keys)
-        for key in self.model.obs_encoder.rgb_keys:
-            for param in self.model.obs_encoder.key_model_map[key].parameters():
-                if param.requires_grad and id(param) not in pretrained_param_ids:
-                    pretrained_params.append(param)
-                    pretrained_param_ids.add(id(param))
-        logger.info("pretrained backbone params: %d", len(pretrained_params))
-
-        other_obs_params = [
-            p for p in self.model.obs_encoder.parameters()
-            if p.requires_grad and id(p) not in pretrained_param_ids
-        ]
-        logger.info("other obs_encoder params: %d", len(other_obs_params))
-
-        optimizer_cfg = OmegaConf.to_container(cfg.optimizer, resolve=True)
-        optimizer_cfg.pop("_target_")
-
-        # Use the denoiser's own get_optim_groups so that pos_emb, cond_pos_emb,
-        # LayerNorm weights, and biases are correctly excluded from weight decay.
-        denoiser_groups = self.model.model.get_optim_groups(
-            weight_decay=optimizer_cfg["weight_decay"]
-        )
-        param_groups = [
-            *denoiser_groups,
-            {"params": pretrained_params, "lr": obs_encoder_lr},
-            {"params": other_obs_params},   # full LR: force enc, cross-attn, DAT, …
-        ]
-        self.optimizer = torch.optim.AdamW(params=param_groups, **optimizer_cfg)
-
-        # configure training state
-        self.global_step = 0
-        self.epoch = 0
-
-        if not cfg.training.resume:
-            self.exclude_keys = ["optimizer"]
+class TrainDiffusionUnetCurriculumGatedWorkspace(TrainDiffusionUnetImageWorkspace):
+    """
+    TrainDiffusionUnetImageWorkspace + force-attending visual curriculum and
+    modality-dropout scheduling for TimmObsEncoderWithForceCurriculumGated.
+    __init__ is inherited unchanged (it instantiates the policy generically
+    from cfg.policy, so it already works with the new curriculum-gated
+    policy/encoder). Only run() is overridden, ported line-for-line from the
+    base class with the curriculum/dropout wiring added -- see
+    train_diffusion_transformer_image_workspace.py's run() for the RACP-side
+    twin of this same wiring. Kept as a full copy rather than editing
+    TrainDiffusionUnetImageWorkspace in place, since that workspace is
+    shared by several other active UNet baseline configs
+    (train_conv_workspace_bi_cross*.yaml, train_conv_workspace_cross.yaml,
+    train_conv_workspace.yaml) and run() has no natural hook points to
+    override piecemeal.
+    """
 
     def run(self):
         cfg = copy.deepcopy(self.cfg)
 
-        # find_unused_parameters=True is needed for transformer models where
-        # not every parameter contributes to every forward pass
-        ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
-        accelerator = Accelerator(
-            log_with="wandb",
-            kwargs_handlers=[ddp_kwargs],
-        )
+        accelerator = Accelerator(log_with="wandb")
         wandb_cfg = OmegaConf.to_container(cfg.logging, resolve=True)
         wandb_cfg.pop("project")
         accelerator.init_trackers(
@@ -143,25 +88,25 @@ class TrainDiffusionTransformerImageWorkspace(BaseWorkspace):
             sparse_normalizer = dataset.get_normalizer()
             pickle.dump(sparse_normalizer, open(sparse_normalizer_path, "wb"))
 
+        # load normalizer on all processes
         accelerator.wait_for_everyone()
         sparse_normalizer = pickle.load(open(sparse_normalizer_path, "rb"))
 
+        # configure validation dataset
         val_dataset = dataset.get_validation_dataset()
         val_dataloader = DataLoader(val_dataset, **cfg.val_dataloader)
-        logger.info(
-            "train dataset: %d, train dataloader: %d", len(dataset), len(train_dataloader)
+        print(
+            "train dataset:", len(dataset), "train dataloader:", len(train_dataloader)
         )
-        logger.info(
-            "val dataset: %d, val dataloader: %d", len(val_dataset), len(val_dataloader)
-        )
+        print("val dataset:", len(val_dataset), "val dataloader:", len(val_dataloader))
 
         self.model.set_normalizer(sparse_normalizer)
         if cfg.training.use_ema:
             self.ema_model.set_normalizer(sparse_normalizer)
 
         # force-attending visual curriculum: total step count the blur schedule
-        # decays over (see model/vision/curriculum.py). Hardcoded for this first
-        # pass, not yet exposed in the yaml — see docstring on get_curriculum_scale.
+        # decays over (see model/vision/curriculum.py). Mirrors
+        # train_diffusion_transformer_image_workspace.py's wiring for RACP.
         curriculum_max_step = len(train_dataloader) * cfg.training.num_epochs
         curriculum_scheduler = cfg.curriculum.scheduler
         curriculum_start_scale = cfg.curriculum.start_scale
@@ -194,9 +139,10 @@ class TrainDiffusionTransformerImageWorkspace(BaseWorkspace):
             cfg.training.lr_scheduler,
             optimizer=self.optimizer,
             num_warmup_steps=cfg.training.lr_warmup_steps,
-            num_training_steps=(
-                len(train_dataloader) * cfg.training.num_epochs
-            ) // cfg.training.gradient_accumulate_every,
+            num_training_steps=(len(train_dataloader) * cfg.training.num_epochs)
+            // cfg.training.gradient_accumulate_every,
+            # pytorch assumes stepping LRScheduler every epoch
+            # however huggingface diffusers steps it every batch
             last_epoch=self.global_step - 1,
         )
 
@@ -207,30 +153,38 @@ class TrainDiffusionTransformerImageWorkspace(BaseWorkspace):
 
         # configure checkpoint
         topk_manager = TopKCheckpointManager(
-            save_dir=os.path.join(self.output_dir, "checkpoints"),
-            **cfg.checkpoint.topk,
+            save_dir=os.path.join(self.output_dir, "checkpoints"), **cfg.checkpoint.topk
         )
 
+        # accelerator
         train_dataloader, val_dataloader, self.model, self.optimizer, lr_scheduler = (
             accelerator.prepare(
-                train_dataloader, val_dataloader, self.model, self.optimizer, lr_scheduler
+                train_dataloader,
+                val_dataloader,
+                self.model,
+                self.optimizer,
+                lr_scheduler,
             )
         )
 
-        # print sample batch info
+        # print batch size
         batch_size = cfg.dataloader.batch_size
-        logger.info("batch_size: %d", batch_size)
+        print(f"batch_size: {batch_size}")
         sample_batch = next(iter(train_dataloader))
         for key, attr in sample_batch["obs"]["sparse"].items():
-            logger.info("obs.sparse.%s: %s", key, attr.shape)
-        logger.info("action.sparse: %s", sample_batch["action"]["sparse"].shape)
-        logger.info("dataset.action_type: %s", dataset.action_type)
+            print("obs.sparse.key: ", key, attr.shape)
+        print("obs.sparse: ", sample_batch["action"]["sparse"].shape)
+
+        # print action dimension
+        print("action: ", sample_batch["action"]["sparse"].shape)
+        print("dataset.action_type: ", dataset.action_type)
         action_dimension = sample_batch["action"]["sparse"].shape[-1]
 
         device = self.model.device
         if self.ema_model is not None:
             self.ema_model.to(device)
 
+        # save batch for sampling
         train_sampling_batch = None
 
         if cfg.training.debug:
@@ -242,14 +196,17 @@ class TrainDiffusionTransformerImageWorkspace(BaseWorkspace):
             cfg.training.val_every = 1
             cfg.training.sample_every = 1
 
-        best_val_metric = float("inf")
+        args = {}
+        # Store the best validation metric
+        best_val_metric = float('inf')
+        # training loop
         log_path = os.path.join(self.output_dir, "logs.json.txt")
         with JsonLogger(log_path) as json_logger:
             for local_epoch_idx in range(cfg.training.num_epochs):
                 self.model.train()
 
                 step_log = dict()
-
+                # ========= train for this epoch ==========
                 if cfg.training.freeze_encoder:
                     self.model.obs_encoder.eval()
                     self.model.obs_encoder.requires_grad_(False)
@@ -262,8 +219,13 @@ class TrainDiffusionTransformerImageWorkspace(BaseWorkspace):
                     mininterval=cfg.training.tqdm_interval_sec,
                 ) as tepoch:
                     for batch_idx, batch in enumerate(tepoch):
-                        batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
+                        # device transfer
+                        batch = dict_apply(
+                            batch, lambda x: x.to(device, non_blocking=True)
+                        )
 
+                        # always use the latest batch
+                        # except for the last batch of an epoch (last batch might not have full batch size)
                         if (
                             batch_idx == 0
                             or batch["action"]["sparse"].shape[0] == batch_size
@@ -279,36 +241,49 @@ class TrainDiffusionTransformerImageWorkspace(BaseWorkspace):
                         )
                         self.model.obs_encoder.curriculum_scale = curriculum_scale
 
-                        raw_loss = self.model(batch)
+                        # compute loss
+                        raw_loss = self.model(batch, args)
+
                         accelerator.backward(raw_loss)
 
-                        # optional gradient norm logging
+                        # compute gradient for logging
                         if cfg.training.log_gradient_norm:
-                            model_unwrapped = accelerator.unwrap_model(self.model)
-                            grads = [
-                                p.grad.detach().flatten()
-                                for p in model_unwrapped.model.parameters()
-                                if p.grad is not None
+                            sparse_grads = [
+                                param.grad.detach().flatten()
+                                for param in model_unwrapped.model_sparse.parameters()
+                                if param.grad is not None
                             ]
-                            grad_norm = torch.cat(grads).norm() if grads else 0.0
-                            step_log["grad_norm"] = grad_norm
+                            sparse_norm = (
+                                torch.cat(sparse_grads).norm()
+                                if len(sparse_grads) > 0
+                                else 0
+                            )
 
-                        if self.global_step % cfg.training.gradient_accumulate_every == 0:
+                        # step optimizer
+                        if (
+                            self.global_step % cfg.training.gradient_accumulate_every
+                            == 0
+                        ):
                             self.optimizer.step()
                             self.optimizer.zero_grad()
                             lr_scheduler.step()
 
+                        # clear cache to avoid memory leak
                         if self.global_step % 500 == 0:
                             torch.cuda.empty_cache()
 
+                        # update ema
                         if cfg.training.use_ema:
                             ema.step(accelerator.unwrap_model(self.model))
 
+                        # logging
+                        model_unwrapped = accelerator.unwrap_model(self.model)
                         raw_loss_cpu = raw_loss.detach().cpu().item()
+                        sparse_loss = model_unwrapped.get_loss_components()
                         tepoch.set_postfix(loss=raw_loss_cpu, refresh=False)
                         train_losses.append(raw_loss_cpu)
                         step_log = {
-                            "train_loss": raw_loss_cpu,
+                            "sparse_loss": sparse_loss,
                             "global_step": self.global_step,
                             "epoch": self.epoch,
                             "lr": lr_scheduler.get_last_lr()[0],
@@ -317,6 +292,7 @@ class TrainDiffusionTransformerImageWorkspace(BaseWorkspace):
 
                         is_last_batch = batch_idx == (len(train_dataloader) - 1)
                         if not is_last_batch:
+                            # log of last step is combined with validation and rollout
                             accelerator.log(step_log, step=self.global_step)
                             json_logger.log(step_log)
                             self.global_step += 1
@@ -326,6 +302,8 @@ class TrainDiffusionTransformerImageWorkspace(BaseWorkspace):
                         ):
                             break
 
+                # at the end of each epoch
+                # replace train_loss with epoch average
                 train_loss = np.mean(train_losses)
                 step_log["train_loss"] = train_loss
 
@@ -354,7 +332,9 @@ class TrainDiffusionTransformerImageWorkspace(BaseWorkspace):
                         B, T, -1, action_dimension
                     )
                     step_log[f"{category}_sparse_naction_mse_error"] = (
-                        torch.nn.functional.mse_loss(pred_naction_sparse, gt_naction_sparse)
+                        torch.nn.functional.mse_loss(
+                            pred_naction_sparse, gt_naction_sparse
+                        )
                     )
                     step_log[f"{category}_sparse_cmd_naction_mse_error"] = (
                         torch.nn.functional.mse_loss(
@@ -373,14 +353,17 @@ class TrainDiffusionTransformerImageWorkspace(BaseWorkspace):
                     )
 
                 # run diffusion sampling on a training batch
-                if (self.epoch % cfg.training.sample_every) == 0 and accelerator.is_main_process:
+                if (
+                    self.epoch % cfg.training.sample_every) == 0 and accelerator.is_main_process:
                     with torch.no_grad():
+                        # sample trajectory from training set, and evaluate difference
                         batch = dict_apply(
                             train_sampling_batch,
                             lambda x: x.to(device, non_blocking=True),
                         )
                         gt_action = batch["action"]
                         pred_action = policy.predict_action(batch["obs"])
+
                         log_action_mse(step_log, "train", pred_action, gt_action)
 
                         if len(val_dataloader) > 0:
@@ -393,46 +376,65 @@ class TrainDiffusionTransformerImageWorkspace(BaseWorkspace):
                             pred_action = policy.predict_action(batch["obs"])
                             log_action_mse(step_log, "val", pred_action, gt_action)
 
-                            best_val_metric = min(
-                                best_val_metric,
-                                step_log["val_sparse_naction_mse_error"].item(),
-                            )
+                            # Store the validation metric for Optuna (validation action error)
+                            best_val_metric = min(best_val_metric, step_log["val_sparse_naction_mse_error"].item())
 
-                        del batch, gt_action, pred_action
+
+                        del batch
+                        del gt_action
+                        del pred_action
 
                 # checkpoint
-                if (self.epoch % cfg.training.checkpoint_every) == 0 and accelerator.is_main_process:
+                if (
+                    self.epoch % cfg.training.checkpoint_every
+                ) == 0 and accelerator.is_main_process:
+                    # unwrap the model to save ckpt
                     model_ddp = self.model
                     self.model = accelerator.unwrap_model(self.model)
 
+                    # checkpointing
                     if cfg.checkpoint.save_last_ckpt:
                         self.save_checkpoint()
                     if cfg.checkpoint.save_last_snapshot:
                         self.save_snapshot()
 
-                    metric_dict = {k.replace("/", "_"): v for k, v in step_log.items()}
+                    # sanitize metric names
+                    metric_dict = dict()
+                    for key, value in step_log.items():
+                        new_key = key.replace("/", "_")
+                        metric_dict[new_key] = value
+
+                    # We can't copy the last checkpoint here
+                    # since save_checkpoint uses threads.
+                    # therefore at this point the file might have been empty!
                     topk_ckpt_path = topk_manager.get_ckpt_path(metric_dict)
+
                     if topk_ckpt_path is not None:
                         self.save_checkpoint(path=topk_ckpt_path)
 
+                    # recover the DDP model
                     self.model = model_ddp
-
+                # ========= eval end for this epoch ==========
+                # end of epoch
+                # log of last step is combined with validation and rollout
                 accelerator.log(step_log, step=self.global_step)
                 json_logger.log(step_log)
                 self.global_step += 1
                 self.epoch += 1
 
         accelerator.end_training()
+
+        #for optimizatin
         return best_val_metric
 
 
 @hydra.main(
     version_base=None,
     config_path=str(pathlib.Path(__file__).parent.parent.joinpath("config")),
-    config_name=pathlib.Path(__file__).stem,
+    config_name="train_conv_workspace_curriculum_gated",
 )
 def main(cfg):
-    workspace = TrainDiffusionTransformerImageWorkspace(cfg)
+    workspace = TrainDiffusionUnetCurriculumGatedWorkspace(cfg)
     workspace.run()
 
 

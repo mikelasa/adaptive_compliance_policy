@@ -43,9 +43,9 @@ id_list = [0]  # single robot
 camera_id_list = [0, 1] if TWO_CAMERAS else [0]
 
 input_dir = pathlib.Path(
-    os.environ.get("PYRITE_RAW_DATASET_FOLDERS") + "/demonstration_impacts/E1_minimum_demos/200demos"
+    os.environ.get("PYRITE_RAW_DATASET_FOLDERS") + "/RACP_SWITCH"
 )
-output_dir = pathlib.Path(os.environ.get("PYRITE_DATASET_FOLDERS") + "/demonstration_impacts/E1_minimum_demos/200demos")
+output_dir = pathlib.Path(os.environ.get("PYRITE_DATASET_FOLDERS") + "/RACP_SWITCH")
 
 robot_timestamp_dir = output_dir.joinpath("robot_timestamp")
 wrench_timestamp_dir = output_dir.joinpath("wrench_timestamp")

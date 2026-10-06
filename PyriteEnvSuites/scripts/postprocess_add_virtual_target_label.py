@@ -27,7 +27,7 @@ if "PYRITE_DATASET_FOLDERS" not in os.environ:
 dataset_folder_path = os.environ.get("PYRITE_DATASET_FOLDERS")
 
 # Config for flip up (single robot)
-dataset_path = dataset_folder_path + "/demonstration_impacts/E1_minimum_demos/200demos"
+dataset_path = dataset_folder_path + "/RACP_SWITCH"
 id_list = [0]
 
 # # Config for vase wiping (bimanual)

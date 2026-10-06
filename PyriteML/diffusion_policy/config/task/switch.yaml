@@ -1,4 +1,4 @@
-name: flip_up_new
+name: switch_100_demos_clip
 
 # rgb vs. low_dim: raw data are either rgb images or low_dim vectors. frames are aligned within each type.
 # obs vs. action: obs data are used as policy input; action are used as labels for policy output.
@@ -11,8 +11,8 @@ sparse_obs_rgb_horizon: 2
 sparse_obs_low_dim_down_sample_steps: 5
 sparse_obs_low_dim_horizon: 3
 
-sparse_obs_wrench_down_sample_steps: 1
-sparse_obs_wrench_horizon: 7000
+sparse_obs_wrench_down_sample_steps: 4
+sparse_obs_wrench_horizon: 32
 
 sparse_action_down_sample_steps: 50
 sparse_action_horizon: 16
@@ -22,10 +22,17 @@ shape_meta: &shape_meta
   # acceptable types: rgb, low_dim
   # fields under raw and obs must be consistent with FlipUpDataset.raw_to_obs_action()
   id_list: [0]
+  camera_id_list: [0]        # set to [0, 1] to enable second camera
   raw: # describes what exists in data
     rgb_0:
       shape: [3, 224, 224]
       type: rgb
+    # rgb_1:                 # uncomment when camera_id_list: [0, 1]
+    #   shape: [3, 224, 224]
+    #   type: rgb
+    # rgb_time_stamps_1:
+    #   shape: [1]
+    #   type: timestamp
     ts_pose_fb_0:
       shape: [7]
       type: low_dim
@@ -51,10 +58,16 @@ shape_meta: &shape_meta
       shape: [1]
       type: timestamp
 
-  obs: # describes observations loaded to memory 
+  obs: # describes observations loaded to memory
     rgb_0:
       shape: [3, 224, 224]
       type: rgb
+    # rgb_1:                 # uncomment when camera_id_list: [0, 1]
+    #   shape: [3, 224, 224]
+    #   type: rgb
+    # rgb_time_stamps_1:
+    #   shape: [1]
+    #   type: timestamp
     robot0_eef_pos:
       shape: [3]
       type: low_dim
@@ -85,6 +98,9 @@ shape_meta: &shape_meta
         rgb_0:
           horizon: ${task.sparse_obs_rgb_horizon} # int
           down_sample_steps: ${task.sparse_obs_rgb_down_sample_steps} # int
+        # rgb_1:             # uncomment when camera_id_list: [0, 1]
+        #   horizon: ${task.sparse_obs_rgb_horizon}
+        #   down_sample_steps: ${task.sparse_obs_rgb_down_sample_steps}
         robot0_eef_pos:
           horizon: ${task.sparse_obs_low_dim_horizon} # int
           down_sample_steps: ${task.sparse_obs_low_dim_down_sample_steps} # float
@@ -100,7 +116,7 @@ shape_meta: &shape_meta
         down_sample_steps: ${task.sparse_action_down_sample_steps} # int
 
 task_name: &task_name flip_up
-dataset_path: ${oc.env:PYRITE_DATASET_FOLDERS}/flip_up_new_v5
+dataset_path: ${oc.env:PYRITE_DATASET_FOLDERS}/RACP_SWITCH
 
 env_runner: # used in workspace for computing metrics
   _target_: diffusion_policy.env_runner.real_pusht_image_runner.RealPushTImageRunner
@@ -115,4 +131,5 @@ dataset:
   temporally_independent_normalization: False
   seed: 42
   val_ratio: 0.05
-  normalize_wrench: False
+  normalize_wrench: True
+  n_demos: 50  # set to 150, 100, or 50 to subsample; null uses all demos

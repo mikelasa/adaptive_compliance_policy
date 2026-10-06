@@ -1,9 +1,10 @@
 defaults:
   - _self_
-  - task: flip_up_conv.yaml
+  - task: flip_up.yaml
+  #- task: switch
   - override hydra/sweeper: optuna
 
-name: ${policy.obs_encoder.fuse_mode}_VIT_transformer_${policy.obs_encoder.force_encoder_cfg.type}
+name: $_RACP_Baseline_100_demos
 output_dir: ${oc.env:PYRITE_CHECKPOINT_FOLDERS}
 _target_: diffusion_policy.workspace.train_diffusion_transformer_image_workspace.TrainDiffusionTransformerImageWorkspace
 
@@ -18,7 +19,7 @@ policy:
 
   noise_scheduler:
     _target_: diffusers.DDIMScheduler
-    num_train_timesteps: 50
+    num_train_timesteps: 100
     beta_start: 0.0001
     beta_end: 0.02
     beta_schedule: squaredcos_cap_v2
@@ -30,7 +31,7 @@ policy:
   obs_encoder:
     _target_: diffusion_policy.model.vision.timm_obs_encoder_bi_cross_dat_transformer.TimmObsEncoderBiCrossDATTransformer
     shape_meta: ${shape_meta}
-    fuse_mode: bi-cross-attention-DAT  # modality-attention | bi-cross-attention | bi-cross-attention-DAT | DAT
+    fuse_mode: modality-attention  # modality-attention (no modules) | bi-cross-attention | bi-cross-attention-DAT | DAT
     second_camera: false
     reduce_pretrained_lr: True
     position_encoding: learnable
@@ -42,6 +43,11 @@ policy:
     bi_cross_heads: 4
     bi_cross_attn_drop: 0.1   # dropout on the cross-attention weights (img<->force)
     bi_cross_drop: 0.05       # dropout after the cross-attn residual + its FFN
+    # RA-only ablation -- DualAttention concatenates self-attn and
+    # relational-attn outputs, so the head-count ratio controls what
+    # fraction of each DAT block's output dimension comes from relational
+    # attention. sa=0 removes ordinary self-attention entirely, so every DAT
+    # layer is pure relational attention over the retrieved symbols.
     n_heads_sa: 8
     n_heads_ra: 8
     share_attn_params: False
@@ -52,6 +58,35 @@ policy:
     dat_norm_first: True
     dat_ra_kwargs:
       symmetric_rels: True
+
+    # Contact gate (see contact_gate_enabled on the obs_encoder). Constructor
+    # arg, not a runtime-settable one like curriculum/modality_dropout below
+    # -- it decides whether the model even HAS the learnable no-contact
+    # placeholder parameter, so old checkpoints (enabled=False, no such
+    # parameter) keep loading with strict=True. Runs at train AND eval
+    # (unlike curriculum/modality_dropout) -- part of the deployed policy.
+    # For a clean first experiment, keep curriculum.scheduler: "no" and
+    # modality_dropout.{img_p,force_p}: 0.0 while this is enabled.
+    # v4: Schmitt-trigger hysteresis scanned over the observed wrench window
+    # (opens above contact_gate_threshold_high, closes below
+    # contact_gate_threshold, holds state in between -- see forward() in
+    # timm_obs_encoder_bi_cross_dat_transformer.py). Replaces v3 (literal
+    # replica of the reference torque-gating repo, diffusion_policy_gating.py /
+    # DiffusionPolicyUNetGating -- instantaneous, most recent timestep only,
+    # hard threshold, no ramp), which flickered open/closed on sensor noise:
+    # the measured free-motion wrench noise floor (~3-5N residual, 2-6N
+    # pose-dependent bias uncorrected -- see project_wrench_nn_calib memory)
+    # sits right against a single 7N cutoff. Earlier v1 (hard, but comparing
+    # against range-normalized [-1,1] wrench instead of raw Newtons -- a bug,
+    # not a design choice) was also replaced, not kept as an alternate mode.
+    contact_gate_enabled: False
+    contact_gate_threshold: 5.0        # N -- closing (lower) bound of the
+      # hysteresis band. Literal match to reference's
+      # self.algo.gating.contact_force_threshold (diffusion_policy_gating_config.py).
+    contact_gate_threshold_high: 7.0  # N -- opening (upper) bound of the
+      # hysteresis band.
+      # both originally from stiffness_estimation_para in
+      # PyriteEnvSuites/scripts/postprocess_add_virtual_target_label_clipped.py
 
     vision_encoder_cfg:
       model_name: 'vit_base_patch32_clip_224.openai'
@@ -71,8 +106,8 @@ policy:
       share_rgb_model: False
 
     force_encoder_cfg:
-      type: cnn1d
-      feature_dim: 768  # must match vision encoder embed_dim so tokens are compatible
+      type: fft
+      feature_dim: 384  # must match vision encoder embed_dim so tokens are compatible
       last_n_tokens: 1
       frozen: False
       share_force_model: False
@@ -90,10 +125,23 @@ curriculum:
   # diffusion_policy/model/vision/curriculum.py). Blurs vision input during
   # training only, decaying to 0 (full detail) by the end of training;
   # predict_action()/eval() are never affected.
+  # Mutually exclusive with modality_dropout below (see the workspace's
+  # run() guard) -- must be "no" to train with modality dropout instead.
   space: pixel      # latent (post-ViT tokens) | pixel (raw image, FACTR's own default)
-  scheduler: "cos"  # no | const | linear | cos | exp | step -- must stay quoted: bare `no`/`off`/`yes`/`on` parse as YAML booleans
+  scheduler: "no"   # no | const | linear | cos | exp | step -- must stay quoted: bare `no`/`off`/`yes`/`on` parse as YAML booleans
   start_scale: 4.0   # Gaussian sigma at the start of the decay
   end_scale: 0.0
+
+modality_dropout:
+  # Bidirectional modality dropout (train-only; see img_dropout_p/force_dropout_p
+  # on TimmObsEncoderBiCrossDATTransformer). Independently zeroes the whole image
+  # sequence or the whole wrench sequence (never both) for a fraction of training
+  # samples each step, forcing the network into a decisive, contingent reliance
+  # on each modality rather than a soft always-blend. Static for the whole run,
+  # no schedule. Mutually exclusive with curriculum above -- curriculum.scheduler
+  # must be "no" for these to take effect (enforced in the workspace's run()).
+  img_p: 0.0
+  force_p: 0.0
 
 ema:
   _target_: diffusion_policy.model.diffusion.ema_model.EMAModel
@@ -145,7 +193,7 @@ training:
   tqdm_interval_sec: 1.0
 
 logging:
-  project: RACP_TILT
+  project: RACP_SWITCH
   resume: False
   mode: online
   name: ${now:%Y.%m.%d-%H.%M.%S}_${task_name}_${name}

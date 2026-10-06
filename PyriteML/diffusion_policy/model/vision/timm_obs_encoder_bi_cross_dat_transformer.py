@@ -57,6 +57,10 @@ class TimmObsEncoderBiCrossDATTransformer(ModuleAttrMixin):
         dat_norm_first: bool = True,
         dat_ra_kwargs: dict = None,
         dat_n_layers: int = 1,
+        contact_gate_enabled: bool = False,
+        contact_gate_threshold: float = 7.0,
+        contact_gate_threshold_high: float = 17.0,
+        contact_gate_mode: str = "soft",
     ):
         """
         Token-sequence variant of TimmObsEncoderWithForceV1 for transformer diffusion
@@ -223,6 +227,62 @@ class TimmObsEncoderBiCrossDATTransformer(ModuleAttrMixin):
         #              FACTR's own default / what their reported results use.
         self.curriculum_scale = 0.0
         self.curriculum_space = "latent"
+        # Modality dropout (train-only, no-op by default): independently zero
+        # out an entire modality's raw input (all T frames/timesteps at once,
+        # per batch sample) for a fraction of training steps, forcing the
+        # network to learn a decisive, contingent reliance on each modality
+        # rather than a soft always-blend of both. Unlike curriculum_scale
+        # above (which gradually degrades vision over training), this drops
+        # a whole modality outright -- set externally by the training
+        # loop/config, same convention as curriculum_scale. No-op at eval
+        # (gated on self.training) and no-op by default (both start at 0.0).
+        self.img_dropout_p = 0.0
+        self.force_dropout_p = 0.0
+        # Contact gate (paper: "Learning When to See and When to Feel", Eq. 1).
+        # v4: Schmitt-trigger hysteresis scanned over the observed wrench
+        # window (contact_gate_threshold_high to open, contact_gate_threshold
+        # to close; state holds in between): gated = phi*feat + (1-phi)*h*.
+        # Replaces v3 (literal replica of the reference torque-gating
+        # implementation, diffusion_policy_gating.py / DiffusionPolicyUNetGating
+        # -- INSTANTANEOUS, most recent timestep only, no window, and HARD, no
+        # ramp: phi = 1[|force| > threshold]), which flickered open/closed on
+        # sensor noise since the measured free-motion noise floor (~3-6N) sits
+        # right against a single 7N cutoff. See forward() below for the scan.
+        # Unlike curriculum_scale/dropout above, this is NOT train-only -- it
+        # runs identically at train and eval, since it's meant to be part of
+        # the deployed policy, not a training regularizer.
+        # IMPORTANT: contact_gate_enabled is a constructor arg (unlike the
+        # runtime-settable attributes above) so old checkpoints -- saved
+        # before this feature existed, with no force_no_contact_token key --
+        # keep loading with strict=True. The placeholder parameter below is
+        # only ever created when a run explicitly opts in via
+        # policy.obs_encoder.contact_gate_enabled: true; every existing
+        # checkpoint/config reconstructs with enabled=False (the default) and
+        # gets the exact same architecture as before this change, byte for
+        # byte -- nothing about this is retroactive.
+        self.contact_gate_enabled = contact_gate_enabled
+        self.contact_gate_threshold = contact_gate_threshold
+        self.contact_gate_threshold_high = contact_gate_threshold_high
+        if self.contact_gate_enabled:
+            # learnable "no-contact" embedding (paper's f*, reference's
+            # neutral_embedding), substituted for real force tokens while
+            # the gate is closed.
+            self.force_no_contact_token = nn.Parameter(torch.zeros(1, 1, self.v_feature_dim))
+            nn.init.normal_(self.force_no_contact_token, std=0.02)
+        # Set by the policy via set_wrench_normalizer() (see set_normalizer()
+        # in DiffusionTransformerTimmMod1Policy) so the gate can threshold
+        # against raw Newtons, matching the reference implementation's
+        # explicit unnormalization before its threshold comparison.
+        # obs_dict[wrench_key] inside forward() below is whatever the policy
+        # handed to forward() -- range-normalized to [-1,1] whenever the task
+        # config has normalize_wrench: True (e.g. flip_up_conv.yaml, the
+        # active task) -- so comparing it directly against
+        # contact_gate_threshold (real Newtons, e.g. 1.0N to match the
+        # reference's contact_force_threshold) would silently compare
+        # incompatible units unless this is wired up. Left as None only when
+        # the task has normalize_wrench: False, where obs_dict is already raw.
+        self._wrench_normalizer_ref = None
+        self._wrench_normalizer_key = None
         self.key_model_map = key_model_map
         self.key_transform_map = key_transform_map
         self.rgb_keys = rgb_keys
@@ -369,6 +429,18 @@ class TimmObsEncoderBiCrossDATTransformer(ModuleAttrMixin):
             "number of parameters: %e", sum(p.numel() for p in self.parameters())
         )
 
+    def set_wrench_normalizer(self, sparse_normalizer, wrench_key):
+        """Wire in the policy's normalizer so the contact gate (see
+        contact_gate_enabled in __init__) can unnormalize wrench back to raw
+        Newtons before thresholding. Called by
+        DiffusionTransformerTimmMod1Policy.set_normalizer() -- stores a
+        reference, not a snapshot, so it stays correct even if the
+        normalizer's state is loaded/updated after this call (e.g. resuming
+        from a checkpoint). No-op if contact_gate_enabled is False.
+        """
+        self._wrench_normalizer_ref = sparse_normalizer
+        self._wrench_normalizer_key = wrench_key
+
     def forward(self, obs_dict):
         """
         obs_dict values:
@@ -384,11 +456,23 @@ class TimmObsEncoderBiCrossDATTransformer(ModuleAttrMixin):
         low_dim_tokens = []
         batch_size = next(iter(obs_dict.values())).shape[0]
 
+        # ── modality dropout (train-only; see img_dropout_p/force_dropout_p
+        # in __init__) ───────────────────────────────────────────────────────
+        drop_img = torch.zeros(batch_size, dtype=torch.bool, device=self.device)
+        drop_force = torch.zeros(batch_size, dtype=torch.bool, device=self.device)
+        if self.training and (self.img_dropout_p > 0 or self.force_dropout_p > 0):
+            drop_img = torch.rand(batch_size, device=self.device) < self.img_dropout_p
+            drop_force = torch.rand(batch_size, device=self.device) < self.force_dropout_p
+            drop_force = drop_force & ~drop_img  # never drop both for the same sample
+
         # ── rgb ───────────────────────────────────────────────────────────────
         for key in self.rgb_keys:
             img = obs_dict[key]  # (B, T, C, H, W)
             B, T = img.shape[:2]
             assert B == batch_size
+            if drop_img.any():
+                img = img.clone()
+                img[drop_img] = 0.0
             img = img.reshape(B * T, *img.shape[2:])
             img = self.key_transform_map[key](img)
 
@@ -430,13 +514,74 @@ class TimmObsEncoderBiCrossDATTransformer(ModuleAttrMixin):
             data = obs_dict[key]  # (B, T, 6)
             B, T = data.shape[:2]
             assert B == batch_size
+
+            # ── contact gate (train + eval; see contact_gate_enabled in
+            # __init__). Computed before modality dropout below, so the two
+            # mechanisms never see each other.
+            # v4: Schmitt-trigger hysteresis, scanned sequentially across the
+            # T steps of the already-observed wrench window (sparse_obs_wrench_horizon,
+            # e.g. 32 steps -- real history, not extra data). No state is
+            # persisted across separate forward() calls: training batches are
+            # shuffled, unrelated windows, so cross-call memory would be
+            # meaningless there, and the window itself is long enough to
+            # reconstruct real hysteresis within a single call. Once force
+            # exceeds contact_gate_threshold_high the gate opens and stays
+            # open until force drops below contact_gate_threshold (the old
+            # v3 single cutoff); alpha is the resulting state at the final
+            # (most recent) step. This replaces v3's single-sample hard
+            # threshold, which flickered open/closed on sensor noise -- the
+            # measured free-motion noise floor (~3-6N) sits right against
+            # the old single 7N cutoff.
+            # Unnormalized back to raw Newtons first -- obs_dict[key] here is
+            # range-normalized to [-1,1] whenever the task has
+            # normalize_wrench: True (flip_up_conv.yaml does), and both
+            # thresholds are in real Newtons, so comparing the normalized
+            # tensor directly would silently compare incompatible units
+            # (this was a real bug in the earlier v1 version -- the gate was
+            # effectively almost-always-closed regardless of actual
+            # contact). Matches the reference implementation, which also
+            # explicitly unnormalizes before its threshold check.
+            if self.contact_gate_enabled:
+                if self._wrench_normalizer_ref is not None:
+                    raw = self._wrench_normalizer_ref[self._wrench_normalizer_key].unnormalize(data)
+                else:
+                    raw = data  # normalize_wrench: False for this task -- already raw
+                force_norm = raw[:, :, :3].norm(dim=-1)  # (B, T)
+                # t=0 has no prior state to hold, so -- like every other step
+                # that wants to newly OPEN the gate -- it must clear the high
+                # bound, not the low one. Seeding off the low/close bound was
+                # a real bug: free-motion noise (~3-6N) straddles it, so a
+                # sizeable fraction of genuine no-contact windows would open
+                # on t=0 noise alone and never see a value low enough to
+                # close again, feeding the network noisy "real" force labeled
+                # trustworthy and teaching it to discount force generally.
+                state = (force_norm[:, 0] > self.contact_gate_threshold_high).float()  # (B,)
+                for t in range(1, force_norm.shape[1]):
+                    ft = force_norm[:, t]
+                    opens = ft > self.contact_gate_threshold_high
+                    closes = ft < self.contact_gate_threshold
+                    state = torch.where(opens, torch.ones_like(state), state)
+                    state = torch.where(closes, torch.zeros_like(state), state)
+                alpha = state  # (B,) gate value at the most recent timestep
+
+            if drop_force.any():
+                data = data.clone()
+                data[drop_force] = 0.0
             if self.force_encoder_type == "fft":
                 data = data.permute(0, 2, 1)
                 feature = self.key_model_map[key](data.float())
                 feature = feature[:, :, -self.fft_last_n_tokens:].permute(0, 2, 1)  # (B, last_n, D)
+                if self.contact_gate_enabled:
+                    a = alpha[:, None, None]
+                    placeholder = self.force_no_contact_token.expand(B, feature.shape[1], -1)
+                    feature = a * feature + (1.0 - a) * placeholder
                 force_features.append(feature)
             else:
                 feature = self.key_model_map[key](data.float())  # (B, T, D)
+                if self.contact_gate_enabled:
+                    a = alpha[:, None, None]
+                    placeholder = self.force_no_contact_token.expand(B, T, -1)
+                    feature = a * feature + (1.0 - a) * placeholder
                 force_features.append(feature)
 
         # ── low_dim → tokens ──────────────────────────────────────────────────
