@@ -1,0 +1,159 @@
+defaults:
+  - _self_
+  - task: flip_up_DP.yaml
+
+# Vanilla Diffusion Policy baseline.
+#
+# Hyperparameters are the published ones from
+# real-stanford/diffusion_policy, config/train_diffusion_unet_real_image_workspace.yaml
+# (the real-robot UNet-image recipe). Anything that deviates is marked DEVIATION
+# with a reason; everything else is upstream verbatim.
+#
+#   python PyriteML/diffusion_policy/workspace/train_diffusion_unet_image_workspace_DP.py --config-name=train_DP
+
+name: DP_Baseline
+output_dir: ${oc.env:PYRITE_CHECKPOINT_FOLDERS}
+_target_: diffusion_policy.workspace.train_diffusion_unet_image_workspace_DP.TrainDiffusionUnetImageWorkspaceDP
+
+task_name: ${task.name}
+shape_meta: ${task.policy_shape_meta}
+exp_name: "default"
+
+horizon: 16
+n_obs_steps: ${task.n_obs_steps} # 2
+n_action_steps: 8
+dataset_obs_steps: ${n_obs_steps}
+past_action_visible: False
+keypoint_visible_rate: 1.0
+
+policy:
+  _target_: diffusion_policy.policy.diffusion_unet_image_policy.DiffusionUnetImagePolicy
+
+  shape_meta: ${shape_meta}
+
+  noise_scheduler:
+    _target_: diffusers.schedulers.scheduling_ddim.DDIMScheduler
+    num_train_timesteps: 100
+    beta_start: 0.0001
+    beta_end: 0.02
+    beta_schedule: squaredcos_cap_v2
+    clip_sample: True
+    set_alpha_to_one: True
+    steps_offset: 0
+    prediction_type: epsilon
+
+  obs_encoder:
+    _target_: diffusion_policy.model.vision.multi_image_obs_encoder.MultiImageObsEncoder
+    shape_meta: ${shape_meta}
+    rgb_model:
+      _target_: diffusion_policy.model.vision.model_getter.get_resnet
+      name: resnet18
+      weights: null # upstream trains the vision encoder from scratch
+    # DEVIATION: upstream resizes 240x320 -> crops 216x288 (0.9 of each side).
+    # Our frames are already 224x224, so no resize is needed and the crop is
+    # the same 0.9 ratio. (ACP's own RandomCrop uses ratio 0.95.)
+    resize_shape: null
+    crop_shape: [201, 201]
+    random_crop: True
+    use_group_norm: True
+    share_rgb_model: False
+    imagenet_norm: True
+
+  horizon: ${horizon}
+  n_action_steps: ${n_action_steps}
+  n_obs_steps: ${n_obs_steps}
+  num_inference_steps: 100
+  obs_as_global_cond: True
+  diffusion_step_embed_dim: 128
+  down_dims: [512, 1024, 2048]
+  kernel_size: 5
+  n_groups: 8
+  cond_predict_scale: True
+  # DDPM-IP is not part of published DP; this key only exists because the
+  # vendored policy file defaults it to 0.1. 0.0 == upstream behaviour.
+  input_pertub: 0.0
+
+ema:
+  _target_: diffusion_policy.model.diffusion.ema_model.EMAModel
+  update_after_step: 0
+  inv_gamma: 1.0
+  power: 0.75
+  min_value: 0.0
+  max_value: 0.9999
+
+dataloader:
+  batch_size: 64
+  num_workers: 16
+  shuffle: True
+  pin_memory: True
+  persistent_workers: False
+
+val_dataloader:
+  batch_size: 64
+  num_workers: 16
+  shuffle: False
+  pin_memory: True
+  persistent_workers: False
+
+optimizer:
+  _target_: torch.optim.AdamW
+  lr: 1.0e-4
+  betas: [0.95, 0.999]
+  eps: 1.0e-8
+  weight_decay: 1.0e-6
+
+training:
+  device: "cuda:0"
+  seed: 42
+  debug: False
+  resume: False
+  lr_scheduler: cosine
+  lr_warmup_steps: 500
+  num_epochs: 600
+  gradient_accumulate_every: 1
+  use_ema: True
+  freeze_encoder: False
+  # training loop control, in epochs
+  rollout_every: 50
+  checkpoint_every: 10
+  val_every: 5
+  sample_every: 5
+  # steps per epoch
+  max_train_steps: null
+  max_val_steps: null
+  tqdm_interval_sec: 1.0
+
+logging:
+  project: E1_minimum_demos
+  resume: False
+  mode: online
+  name: ${now:%Y.%m.%d-%H.%M.%S}_${task_name}_${name}
+  tags: ["${name}", "${task_name}", "${exp_name}"]
+  id: null
+  group: null
+
+checkpoint:
+  topk:
+    # DEVIATION: upstream monitors train_loss. Monitoring the normalized action
+    # error instead matches how the ACP runs pick their best checkpoint, so the
+    # two models are compared under the same selection rule. This affects which
+    # checkpoint is kept, not what is learned.
+    monitor_key: val_naction_mse_error
+    mode: min
+    k: 20
+    format_str: 'epoch={epoch:04d}-train_loss={train_loss:.3f}.ckpt'
+  save_last_ckpt: True
+  save_last_snapshot: False
+
+multi_run:
+  run_dir: ${output_dir}/${now:%Y.%m.%d}_${now:%H.%M.%S}_${task_name}_${name}
+  wandb_name_base: ${now:%Y.%m.%d-%H.%M.%S}_${task_name}_${name}
+
+hydra:
+  job:
+    override_dirname: ${name}
+  run:
+    dir: ${output_dir}/${now:%Y.%m.%d}_${now:%H.%M.%S}_${task_name}_${name}
+  sweep:
+    dir: ${output_dir}/${now:%Y.%m.%d}_${now:%H.%M.%S}_${task_name}_${name}
+    subdir: ${hydra.job.num}

@@ -33,11 +33,11 @@ WRENCH_MA_WINDOW = 1000        # same as wrench_moving_average_window_size
 SPARSE_EXECUTION_HORIZON = 12  # executed steps per horizon (control_para["sparse_execution_horizon"])
 
 
-TEST_PATH    = "/home/robotlab/data/resultados-tests/post blend/E3-stiffness_force_modulation_RACP_VS_ACP/RACP/temp"
-COMPARE_PATH = "/home/robotlab/data/resultados-tests/post blend/E3-stiffness_force_modulation_RACP_VS_ACP/ACP/temp"
+TEST_PATH    = "/home/robotlab/data/resultados-tests/CAP5/CurvaNew/temp_worldframe"
+COMPARE_PATH = "/home/robotlab/data/resultados-tests/CAP6-demos/E1-demos/wipe/150/temp_worldframe"
 TRAIN_PATH = "/home/robotlab/data/real_processed/V3/flip_up_V3_distractors_500K_30F_0045c/data/episode_1778746728"
 FLAG_GROUND_TRUTH = False      # set to False to skip loading/plotting ground-truth episode
-FLAG_COMPARE = True        # set to False to skip the comparison plot episode_1778754577 episode_1778746728
+FLAG_COMPARE = False        # set to False to skip the comparison plot episode_1778754577 episode_1778746728
 
 
 def extract_stiffness_diag(ts_stiffnesses: np.ndarray) -> np.ndarray:
@@ -276,6 +276,36 @@ def load_scalar_stiffness_sequences(dataset_path: str):
     return scalar_stiffnesses, has_scalars
 
 
+def tidy_axes(fig, axes, left_in: float = 1.0, right_in: float = 0.25,
+              use_tight_layout: bool = True):
+    """
+    Keep Y tick labels on screen and readable.
+
+    These figures can be several times wider than the display, which opens the
+    window larger than the screen and clips the left margin -- taking the Y
+    tick labels with it. tight_layout's margins are *fractional*, so on a wide
+    figure they shrink to almost nothing in inches; this reserves an absolute
+    margin in inches instead, and forces plain (non-offset) Y tick labels so
+    stiffness reads as "1300" rather than an offset-notation header.
+
+    Args:
+        fig:              the figure to adjust
+        axes:             one Axes, or any array/list of Axes
+        left_in/right_in: margin to reserve, in inches
+        use_tight_layout: skip for 3D axes, where tight_layout misbehaves
+    """
+    for ax in np.atleast_1d(np.asarray(axes, dtype=object)).ravel():
+        ax.tick_params(axis="both", labelsize=8)
+        try:
+            ax.ticklabel_format(axis="y", style="plain", useOffset=False)
+        except Exception:
+            pass  # log-scale or non-scalar formatter; nothing to do
+    if use_tight_layout:
+        fig.tight_layout()
+    fig_w = fig.get_size_inches()[0]
+    fig.subplots_adjust(left=left_in / fig_w, right=1.0 - right_in / fig_w)
+
+
 def plot(dataset_path: str, episode_path: str = None,
          plot_ground_truth: bool = FLAG_GROUND_TRUTH,
          compare_path: str = None):
@@ -368,7 +398,9 @@ def plot(dataset_path: str, episode_path: str = None,
             ax.axvline(j, color="gray", linewidth=0.4, linestyle=":", alpha=0.5)
 
     nrows = 2 if cmp_stiff_seqs is not None else 1
-    fig_w1 = max(12, min(N * 1.0, 40))
+    # capped at 18in: beyond that the window opens wider than the display and
+    # the left margin (with the Y tick labels) is clipped off screen
+    fig_w1 = max(12, min(N * 1.0, 18))
     fig1, axes_f1 = plt.subplots(nrows, 1, figsize=(fig_w1, 4 * nrows),
                                   sharex=True, squeeze=False)
     fig1.suptitle("Predicted Stiffness Value along Each World Coordinate Axis")
@@ -377,13 +409,15 @@ def plot(dataset_path: str, episode_path: str = None,
     if cmp_stiff_seqs is not None:
         _fill_ax(axes_f1[1][0], cmp_stiff_seqs, cmp_label)
 
-    # X-axis labels only on bottom subplot
-    axes_f1[-1][0].set_xticks(np.arange(N))
+    # X-axis labels only on bottom subplot, thinned to stay legible now that
+    # the figure width is capped
+    x_stride_f1 = max(1, N // 30)
+    axes_f1[-1][0].set_xticks(np.arange(0, N, x_stride_f1))
     axes_f1[-1][0].set_xticklabels(
-        [f"Horizon {j + 1}" for j in range(N)],
+        [f"Horizon {j + 1}" for j in range(0, N, x_stride_f1)],
         rotation=45, ha="right", fontsize=7,
     )
-    fig1.tight_layout()
+    tidy_axes(fig1, axes_f1)
 
     # --- Figure 2: 3D trajectory ---
     fig2 = plt.figure(figsize=(10, 8))
@@ -442,6 +476,8 @@ def plot(dataset_path: str, episode_path: str = None,
     ax3d.set_zlabel("Z (m)")
     ax3d.legend(fontsize=7)
     set_axes_equal(ax3d)
+    # no tight_layout: it misbehaves on 3D axes
+    tidy_axes(fig2, ax3d, use_tight_layout=False)
 
     # --- Figure 3: filtered wrench + force norm ---
     if wrench_data is not None or ep_wrench_data is not None:
@@ -501,7 +537,7 @@ def plot(dataset_path: str, episode_path: str = None,
         f_axes[6].set_title("||F|| (filtered)")
         f_axes[6].grid(True)
         f_axes[-1].set_xlabel("Normalized time (0 = start, 1 = end)")
-        fig3.tight_layout()
+        tidy_axes(fig3, f_axes)
 
     # --- Figure 4: scalar stiffness per step (top) + ground truth (bottom) ---
     scalar_stiffnesses, has_scalars = load_scalar_stiffness_sequences(dataset_path)
@@ -535,11 +571,22 @@ def plot(dataset_path: str, episode_path: str = None,
             except Exception as e:
                 print(f"  WARNING: could not load compare post-blend scalar stiffness — {e}")
 
-        fig_w4 = max(10, min(n_horizons * 1.2, 40))
+        # Fixed width: the X axis is normalized to [0, 1] below, so the figure
+        # no longer needs to grow with n_horizons (a 40-inch-wide window pushed
+        # the Y tick labels off screen).
         fig4, (ax4_top, ax4_mid, ax4_bot) = plt.subplots(
-            3, 1, figsize=(fig_w4, 9), sharex=True
+            3, 1, figsize=(13, 9), sharex=True
         )
         fig4.suptitle("Scalar Stiffness: Inference vs Ground Truth")
+
+        # Horizon boundaries, thinned so a long run doesn't become a solid wall
+        # once the axis is squeezed into [0, 1].
+        h_stride = max(1, n_horizons // 40)
+
+        def _draw_horizon_lines(ax):
+            for h_idx in range(h_stride, n_horizons, h_stride):
+                ax.axvline(h_idx / n_horizons, color="gray", linewidth=0.6,
+                           linestyle=":", alpha=0.7)
 
         def _plot_scalar_series(ax, series, color, label):
             """Plot one inference scalar stiffness series, solid/dashed for exec/non-exec."""
@@ -548,7 +595,8 @@ def plot(dataset_path: str, episode_path: str = None,
             for h_idx, scalars in enumerate(series):
                 if scalars is None:
                     continue
-                x = h_idx + np.arange(len(scalars)) / SPARSE_EXECUTION_HORIZON
+                # normalized time: horizon index + fractional step, scaled to [0, 1]
+                x = (h_idx + np.arange(len(scalars)) / SPARSE_EXECUTION_HORIZON) / n_horizons
                 ax.plot(x[:exec_end], scalars[:exec_end],
                         color=color, linewidth=1.5,
                         label=label if h_idx == 0 else "_nolegend_")
@@ -561,8 +609,7 @@ def plot(dataset_path: str, episode_path: str = None,
         if cmp_scalar_stiffnesses is not None:
             _plot_scalar_series(ax4_top, cmp_scalar_stiffnesses, color="red", label=cmp_label)
 
-        for h_idx in range(1, n_horizons):
-            ax4_top.axvline(h_idx, color="gray", linewidth=0.6, linestyle=":", alpha=0.7)
+        _draw_horizon_lines(ax4_top)
         ax4_top.set_ylabel("Stiffness (N/m)")
         ax4_top.set_title("Inference  (solid = executed, dashed = not executed)")
         ax4_top.legend(fontsize=8, loc="upper right")
@@ -575,8 +622,7 @@ def plot(dataset_path: str, episode_path: str = None,
         _plot_scalar_series(ax4_mid, postblend_scalar_stiffnesses, color="black", label=test_label)
         if cmp_postblend_scalar_stiffnesses is not None:
             _plot_scalar_series(ax4_mid, cmp_postblend_scalar_stiffnesses, color="red", label=cmp_label)
-        for h_idx in range(1, n_horizons):
-            ax4_mid.axvline(h_idx, color="gray", linewidth=0.6, linestyle=":", alpha=0.7)
+        _draw_horizon_lines(ax4_mid)
         ax4_mid.set_ylabel("Stiffness (N/m)")
         ax4_mid.set_title("Post-blend (sent to robot)")
         ax4_mid.legend(fontsize=8, loc="upper right")
@@ -585,11 +631,9 @@ def plot(dataset_path: str, episode_path: str = None,
         # --- bottom: ground truth from TRAIN_PATH ---
         if ep_data is not None:
             ep_ts_gt, ep_stiffness_gt = ep_data[0], ep_data[1]
-            ep_ts_gt_norm = _norm_ts(ep_ts_gt) * n_horizons
-            ax4_bot.plot(ep_ts_gt_norm, ep_stiffness_gt,
+            ax4_bot.plot(_norm_ts(ep_ts_gt), ep_stiffness_gt,
                          color="royalblue", linewidth=1.0, label="ground truth")
-            for h_idx in range(1, n_horizons):
-                ax4_bot.axvline(h_idx, color="gray", linewidth=0.6, linestyle=":", alpha=0.7)
+            _draw_horizon_lines(ax4_bot)
         else:
             ax4_bot.text(0.5, 0.5, "No ground truth loaded\n(set FLAG_GROUND_TRUTH=True)",
                          ha="center", va="center", transform=ax4_bot.transAxes,
@@ -599,12 +643,15 @@ def plot(dataset_path: str, episode_path: str = None,
         ax4_bot.legend(fontsize=8, loc="upper right")
         ax4_bot.grid(True, axis="y", linestyle=":", alpha=0.5)
 
-        # shared X axis labels on bottom subplot (sharex=True)
-        ax4_bot.set_xticks(np.arange(n_horizons))
-        ax4_bot.set_xticklabels([f"Horizon {i + 1}" for i in range(n_horizons)],
-                                rotation=45, ha="right", fontsize=8)
-        ax4_bot.set_xlim(0, n_horizons)
-        fig4.tight_layout()
+        # shared X axis labels on bottom subplot (sharex=True), normalized to
+        # [0, 1] so this figure lines up with the wrench figure above
+        ax4_bot.set_xticks(np.linspace(0.0, 1.0, 11))
+        ax4_bot.set_xlim(0.0, 1.0)
+        ax4_bot.set_xlabel(
+            f"Normalized time (0 = start, 1 = end) — {n_horizons} horizons, "
+            f"dotted line every {h_stride}"
+        )
+        tidy_axes(fig4, [ax4_top, ax4_mid, ax4_bot])
 
     plt.show()
 

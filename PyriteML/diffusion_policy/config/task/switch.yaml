@@ -116,7 +116,7 @@ shape_meta: &shape_meta
         down_sample_steps: ${task.sparse_action_down_sample_steps} # int
 
 task_name: &task_name flip_up
-dataset_path: ${oc.env:PYRITE_DATASET_FOLDERS}/RACP_SWITCH
+dataset_path: ${oc.env:PYRITE_DATASET_FOLDERS}/CAP6-DEMOS/E1_minimum_demos/switch
 
 env_runner: # used in workspace for computing metrics
   _target_: diffusion_policy.env_runner.real_pusht_image_runner.RealPushTImageRunner
@@ -132,4 +132,4 @@ dataset:
   seed: 42
   val_ratio: 0.05
   normalize_wrench: True
-  n_demos: 50  # set to 150, 100, or 50 to subsample; null uses all demos
+  n_demos: null  # set to 150, 100, or 50 to subsample; null uses all demos

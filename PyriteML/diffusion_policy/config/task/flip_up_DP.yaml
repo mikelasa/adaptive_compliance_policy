@@ -1,0 +1,145 @@
+name: flip_up_100_demos_DP
+
+# Task config for the vanilla Diffusion Policy baseline.
+#
+# `shape_meta` below is byte-for-byte the one in flip_up.yaml. That is
+# deliberate: the SequenceSampler derives its valid start indices from the
+# per-key horizons and down_sample_steps, so keeping them identical means the
+# DP baseline sees exactly the same samples, in the same order, with the same
+# train/val episode split as ACP. DPAdapterDataset then drops the wrench and
+# timestamp keys, truncates each obs key to its last n_obs_steps, and slices
+# the 19-dim action down to the 9-dim nominal pose command.
+#
+# `policy_shape_meta` is what the DP policy and MultiImageObsEncoder actually
+# see: vision + proprioception in, pose9 out.
+
+sparse_obs_rgb_down_sample_steps: 10
+sparse_obs_rgb_horizon: 2
+
+sparse_obs_low_dim_down_sample_steps: 5
+sparse_obs_low_dim_horizon: 3
+
+sparse_obs_wrench_down_sample_steps: 4
+sparse_obs_wrench_horizon: 32
+
+sparse_action_down_sample_steps: 50
+sparse_action_horizon: 16
+
+n_obs_steps: 2
+
+
+shape_meta: &shape_meta
+  id_list: [0]
+  camera_id_list: [0]
+  raw:
+    rgb_0:
+      shape: [3, 224, 224]
+      type: rgb
+    ts_pose_fb_0:
+      shape: [7]
+      type: low_dim
+    ts_pose_command_0:
+      shape: [7]
+      type: low_dim
+    ts_pose_virtual_target_0:
+      shape: [7]
+      type: low_dim
+    stiffness_0:
+      shape: [1]
+      type: low_dim
+    wrench_0:
+      shape: [6]
+      type: low_dim
+    rgb_time_stamps_0:
+      shape: [1]
+      type: timestamp
+    robot_time_stamps_0:
+      shape: [1]
+      type: timestamp
+    wrench_time_stamps_0:
+      shape: [1]
+      type: timestamp
+
+  obs:
+    rgb_0:
+      shape: [3, 224, 224]
+      type: rgb
+    robot0_eef_pos:
+      shape: [3]
+      type: low_dim
+    robot0_eef_rot_axis_angle:
+      shape: [6]
+      type: low_dim
+      rotation_rep: rotation_6d
+    robot0_eef_wrench:
+      shape: [6]
+      type: low_dim
+    rgb_time_stamps_0:
+      shape: [1]
+      type: timestamp
+    robot_time_stamps_0:
+      shape: [1]
+      type: timestamp
+    wrench_time_stamps_0:
+      shape: [1]
+      type: timestamp
+  action:
+    shape: [19] # 9 reference pose, 9 virtual target, 1 stiffness
+    rotation_rep: rotation_6d
+  sample:
+    obs:
+      sparse:
+        rgb_0:
+          horizon: ${task.sparse_obs_rgb_horizon}
+          down_sample_steps: ${task.sparse_obs_rgb_down_sample_steps}
+        robot0_eef_pos:
+          horizon: ${task.sparse_obs_low_dim_horizon}
+          down_sample_steps: ${task.sparse_obs_low_dim_down_sample_steps}
+        robot0_eef_rot_axis_angle:
+          horizon: ${task.sparse_obs_low_dim_horizon}
+          down_sample_steps: ${task.sparse_obs_low_dim_down_sample_steps}
+        robot0_eef_wrench:
+          horizon: ${task.sparse_obs_wrench_horizon}
+          down_sample_steps: ${task.sparse_obs_wrench_down_sample_steps}
+    action:
+      sparse:
+        horizon: ${task.sparse_action_horizon}
+        down_sample_steps: ${task.sparse_action_down_sample_steps}
+
+
+# what the DP policy and MultiImageObsEncoder see. Only rgb and low_dim types
+# are allowed here -- MultiImageObsEncoder raises on anything else.
+policy_shape_meta: &policy_shape_meta
+  obs:
+    rgb_0:
+      shape: [3, 224, 224]
+      type: rgb
+    robot0_eef_pos:
+      shape: [3]
+      type: low_dim
+    robot0_eef_rot_axis_angle:
+      shape: [6]
+      type: low_dim
+      rotation_rep: rotation_6d
+  action:
+    shape: [9] # pose9: position(3) + rotation_6d(6), relative to the first action frame
+    rotation_rep: rotation_6d
+
+task_name: &task_name flip_up_DP
+dataset_path: ${oc.env:PYRITE_DATASET_FOLDERS}/CAP6-DEMOS/E2-camaras/gopro
+
+dataset:
+  _target_: diffusion_policy.dataset.dp_adapter_dataset.DPAdapterDataset
+  policy_shape_meta: *policy_shape_meta
+  n_obs_steps: ${task.n_obs_steps}
+  inner:
+    _target_: diffusion_policy.dataset.virtual_target_dataset.VirtualTargetDataset
+    shape_meta: *shape_meta
+    dataset_path: ${task.dataset_path}
+    sparse_query_frequency_down_sample_steps: 8
+    action_padding: False
+    temporally_independent_normalization: False
+    seed: 42
+    val_ratio: 0.05
+    normalize_wrench: True
+    n_demos: null # set to 150, 100, or 50 to subsample; null uses all demos

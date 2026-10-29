@@ -1,11 +1,10 @@
 defaults:
   - _self_
-  # - task: vase_wiping_conv.yaml
-  #- task: flip_up_conv.yaml
-  - task: switch
+  - task: flip_up.yaml
+  #- task: switch
   - override hydra/sweeper: optuna
 
-name: _ACP_Baseline_200_demos
+name: ACP_Baseline
 output_dir: ${oc.env:PYRITE_CHECKPOINT_FOLDERS}
 _target_: diffusion_policy.workspace.train_diffusion_unet_curriculum_gated_workspace.TrainDiffusionUnetCurriculumGatedWorkspace
 
@@ -169,7 +168,7 @@ training:
 
 
 logging:
-  project: RACP_SWITCH
+  project: E1_minimum_demos
   resume: False
   mode: online
   name: ${now:%Y.%m.%d-%H.%M.%S}_${task_name}_${name}

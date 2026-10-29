@@ -1,10 +1,11 @@
 defaults:
   - _self_
-  - task: flip_up.yaml
+  #- task: flip_up.yaml
   #- task: switch
+  - task: wipe.yaml
   - override hydra/sweeper: optuna
 
-name: $_RACP_Baseline_100_demos
+name: $_RACP_full
 output_dir: ${oc.env:PYRITE_CHECKPOINT_FOLDERS}
 _target_: diffusion_policy.workspace.train_diffusion_transformer_image_workspace.TrainDiffusionTransformerImageWorkspace
 
@@ -31,8 +32,8 @@ policy:
   obs_encoder:
     _target_: diffusion_policy.model.vision.timm_obs_encoder_bi_cross_dat_transformer.TimmObsEncoderBiCrossDATTransformer
     shape_meta: ${shape_meta}
-    fuse_mode: modality-attention  # modality-attention (no modules) | bi-cross-attention | bi-cross-attention-DAT | DAT
-    second_camera: false
+    fuse_mode: bi-cross-attention-DAT  # modality-attention (no modules) | bi-cross-attention | bi-cross-attention-DAT | DAT
+    second_camera: False
     reduce_pretrained_lr: True
     position_encoding: learnable
     symbol_retriever: positional  # positional | position_relative | symbolic | relational_symbolic
@@ -80,10 +81,10 @@ policy:
     # against range-normalized [-1,1] wrench instead of raw Newtons -- a bug,
     # not a design choice) was also replaced, not kept as an alternate mode.
     contact_gate_enabled: False
-    contact_gate_threshold: 5.0        # N -- closing (lower) bound of the
+    contact_gate_threshold: 6.0        # N -- closing (lower) bound of the
       # hysteresis band. Literal match to reference's
       # self.algo.gating.contact_force_threshold (diffusion_policy_gating_config.py).
-    contact_gate_threshold_high: 7.0  # N -- opening (upper) bound of the
+    contact_gate_threshold_high: 8.0  # N -- opening (upper) bound of the
       # hysteresis band.
       # both originally from stiffness_estimation_para in
       # PyriteEnvSuites/scripts/postprocess_add_virtual_target_label_clipped.py
@@ -106,8 +107,8 @@ policy:
       share_rgb_model: False
 
     force_encoder_cfg:
-      type: fft
-      feature_dim: 384  # must match vision encoder embed_dim so tokens are compatible
+      type: cnn1d
+      feature_dim: 768  # must match vision encoder embed_dim so tokens are compatible
       last_n_tokens: 1
       frozen: False
       share_force_model: False
@@ -180,7 +181,7 @@ training:
   tqdm_interval_sec: 1.0
 
 logging:
-  project: RACP_SWITCH
+  project: CAP5-polish
   resume: False
   mode: online
   name: ${now:%Y.%m.%d-%H.%M.%S}_${task_name}_${name}

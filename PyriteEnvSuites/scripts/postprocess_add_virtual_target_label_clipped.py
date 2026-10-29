@@ -27,7 +27,7 @@ if "PYRITE_DATASET_FOLDERS" not in os.environ:
 dataset_folder_path = os.environ.get("PYRITE_DATASET_FOLDERS")
 
 # Config for flip up (single robot)
-dataset_path = dataset_folder_path + "/RACP_SWITCH"
+dataset_path = dataset_folder_path + "/CAP5/curva"
 id_list = [0]
 
 # # Config for vase wiping (bimanual)
@@ -47,10 +47,10 @@ fin_every_n = 50
 stiffness_estimation_para = {
     "k_max": 2000,  # 1cm 50N maximum stiffness
     "k_min": 500,  # 1cm 2.5N minimum stiffness
-    "f_low": 7, #lower bound of the force
-    "f_high": 17,  #upper bound of the force
+    "f_low": 10, #lower bound of the force
+    "f_high": 18,  #upper bound of the force
     "max_disp": 0.034,  #
-    "dim": 3,
+    "dim": 6,
     "characteristic_length": 1,
     "vel_tol": 999.002,
 }

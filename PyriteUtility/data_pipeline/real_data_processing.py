@@ -8,7 +8,11 @@ from PyriteUtility.data_pipeline.episode_data_buffer import (
     VideoData,
     EpisodeDataBuffer,
 )
-from PyriteUtility.planning_control.filtering import LiveLPFilter
+from PyriteUtility.data_pipeline.timestamp_repair import (
+    PHASE_CONCENTRATION_MIN,
+    repair_timestamps_from_seq_id,
+)
+import scipy.signal
 
 import pathlib
 import shutil
@@ -23,6 +27,46 @@ if "PYRITE_RAW_DATASET_FOLDERS" not in os.environ:
     raise ValueError("Please set the environment variable PYRITE_RAW_DATASET_FOLDERS")
 if "PYRITE_DATASET_FOLDERS" not in os.environ:
     raise ValueError("Please set the environment variable PYRITE_DATASET_FOLDERS")
+
+
+def _repaired_time_stamps(df, time_stamp_column, episode_name, stream_name):
+    """Re-derive a hardware-clocked stream's sample times from its seq_id.
+
+    The recorded times are host receive times, so a stall in the logging thread
+    leaves a hole in the stream followed by a burst of samples sharing one
+    timestamp -- see PyriteUtility/data_pipeline/timestamp_repair.py.
+
+    Only streams that are actually hardware-clocked get repaired. The F/T stream
+    is; the Franka robot stream is not (its timestamps are arrival times whose
+    scatter is real), so it passes through untouched. Raw data captured before
+    seq_id was logged also passes through unchanged.
+    """
+    raw = df[time_stamp_column].to_numpy().astype(np.float64)
+    if "seq_id" not in df.columns:
+        print(
+            f"  {episode_name} {stream_name}: no seq_id in raw data, "
+            f"leaving {time_stamp_column} as recorded"
+        )
+        return raw
+
+    repaired, info = repair_timestamps_from_seq_id(df["seq_id"].to_numpy(), raw)
+    if info["phase_concentration"] < PHASE_CONCENTRATION_MIN:
+        # Arrival-stamped, not hardware-clocked: there is no finer sample time
+        # hiding behind these values to recover.
+        return raw
+    if info["n_stall_intervals"]:
+        print(
+            f"  {episode_name} {stream_name}: repaired {info['n_stall_intervals']} "
+            f"stall interval(s), max correction {info['max_correction']:.2f} ms "
+            f"({info['method']}, {info['n'] - info['n_clean']} of {info['n']} "
+            f"samples contaminated)"
+        )
+    if not info["seq_contiguous"]:
+        print(
+            f"  {episode_name} {stream_name}: WARNING seq_id is not contiguous -- "
+            f"the hardware genuinely dropped samples here"
+        )
+    return repaired
 
 
 def image_read(rgb_dir, rgb_file_list, i, output_data_rgb, output_data_rgb_time_stamps):
@@ -43,9 +87,9 @@ id_list = [0]  # single robot
 camera_id_list = [0, 1] if TWO_CAMERAS else [0]
 
 input_dir = pathlib.Path(
-    os.environ.get("PYRITE_RAW_DATASET_FOLDERS") + "/RACP_SWITCH"
+    os.environ.get("PYRITE_RAW_DATASET_FOLDERS") + "/CAP5/curva"
 )
-output_dir = pathlib.Path(os.environ.get("PYRITE_DATASET_FOLDERS") + "/RACP_SWITCH")
+output_dir = pathlib.Path(os.environ.get("PYRITE_DATASET_FOLDERS") + "/CAP5/todo")
 
 robot_timestamp_dir = output_dir.joinpath("robot_timestamp")
 wrench_timestamp_dir = output_dir.joinpath("wrench_timestamp")
@@ -167,31 +211,58 @@ def process_one_episode(root, episode_name, input_dir, id_list, camera_id_list):
     for id in id_list:
         json_path = episode_dir.joinpath("robot_data_" + str(id) + ".json")
         df_robot_data = pd.read_json(json_path)
-        data_robot_time_stamps.append(df_robot_data["robot_time_stamps"].to_numpy())
+        data_robot_time_stamps.append(
+            _repaired_time_stamps(
+                df_robot_data, "robot_time_stamps", episode_name, f"robot_{id}"
+            )
+        )
         data_ts_pose_fb.append(np.vstack(df_robot_data["ts_pose_fb"]))
 
         # read wrench data
         json_path = episode_dir.joinpath("wrench_data_" + str(id) + ".json")
         df_wrench_data = pd.read_json(json_path)
-        data_wrench_time_stamps.append(df_wrench_data["wrench_time_stamps"].to_numpy())
+        data_wrench_time_stamps.append(
+            _repaired_time_stamps(
+                df_wrench_data, "wrench_time_stamps", episode_name, f"wrench_{id}"
+            )
+        )
         data_wrench.append(np.vstack(df_wrench_data["wrench"]))
 
     # get filtered force
     print(f"Computing filtered wrench for {episode_name}")
-    force_filtering_para = {
-        "sampling_freq": 100,
-        "cutoff_freq": 5,
-        "order": 5,
-    }
-    ft_filter = LiveLPFilter(
-        fs=500,
-        cutoff=5,
-        order=5,
-        dim=6,
-    )
+    # This used to be LiveLPFilter(fs=500, cutoff=5, order=5) fed one sample at
+    # a time. Two things were wrong with that here:
+    #
+    # 1. fs was hardcoded to 500, which was right for the 500 Hz UR5 of the
+    #    original work but silently doubled the corner to 10 Hz on a 1 kHz
+    #    Franka -- so the stiffness labels have been carrying twice the force
+    #    noise they were designed to. The rate is now read off the timestamps,
+    #    per arm, so it stays correct on either robot.
+    # 2. LiveLPFilter is causal because it exists for the online control path.
+    #    Here the wrench is an already-recorded array, so causality buys
+    #    nothing and the phase lag is pure loss: it delayed the k label 51-88 ms
+    #    behind the force that produced it. filtfilt runs the filter forwards
+    #    and backwards, giving the same attenuation with zero phase.
+    #
+    # Note this does not remove oscillations below the corner. A ~4 Hz contact
+    # instability still reaches the label almost intact; see
+    # PyriteEnvSuites/scripts/analyze_label_filter_cutoff.py to measure what a
+    # given episode actually passes through.
+    FORCE_FILTER_CUTOFF_HZ = 5
+    FORCE_FILTER_ORDER = 5
     data_wrench_filtered = []
     for id in id_list:
-        data_wrench_filtered.append(np.array([ft_filter(y) for y in data_wrench[id]]))
+        # timestamps are in milliseconds throughout this pipeline
+        dt_ms = np.median(np.diff(data_wrench_time_stamps[id]))
+        fs = 1000.0 / dt_ms
+        sos = scipy.signal.butter(
+            FORCE_FILTER_ORDER, FORCE_FILTER_CUTOFF_HZ, fs=fs, output="sos"
+        )
+        data_wrench_filtered.append(
+            scipy.signal.sosfiltfilt(sos, data_wrench[id], axis=0)
+        )
+        print(f"  arm {id}: wrench at {fs:.0f} Hz, "
+              f"zero-phase lowpass at {FORCE_FILTER_CUTOFF_HZ} Hz")
 
     # make time stamps start from zero
     time_offsets = []

@@ -262,3 +262,9 @@ class DiffusionUnetImagePolicy(BaseImagePolicy):
         loss = reduce(loss, 'b ... -> b (...)', 'mean')
         loss = loss.mean()
         return loss
+
+    def forward(self, batch):
+        # so the policy can be called through an accelerate/DDP wrapper,
+        # which only forwards forward(). Same pattern as
+        # DiffusionUnetTimmMod1Policy.forward(); no effect on the method.
+        return self.compute_loss(batch)

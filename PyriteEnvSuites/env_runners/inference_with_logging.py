@@ -169,7 +169,7 @@ def _blend_chunk_boundary(prev_chunk, blend_window, nominal, virtual, stiffness)
 def main():
     control_para = {
         "raw_time_step_s": 0.001,  # dt of raw data collection. Used to compute time step from time_s such that the downsampling according to shape_meta works.
-        "slow_down_factor": 2,  # 3 for flipup, 1.5 for wiping
+        "slow_down_factor": 3,  # 3 for flipup, 1.5 for wiping
         "sparse_execution_horizon": 12,  # 12 for flipup, 8/24 for wiping
         "max_duration_s": 3500,
         "pausing_mode": False,
@@ -179,7 +179,7 @@ def main():
         "save_low_dim_every_N_frame": 1,
         "save_visual_every_N_frame": 1,
         #"ckpt_path": "/switch/200/2026.09.29-12.41.41_RACP_full_200_demos/checkpoints/latest.ckpt",
-        "ckpt_path": "/tilt/final/2026.09.09-18.02.49_RACP_curriculum/checkpoints/latest.ckpt",
+        "ckpt_path": "/2026.10.14_09.57.21_flip_up_100_demos_$_RACP_full/checkpoints/latest.ckpt",
         # "hardware_config_path": hardware_config_folder_path + "/manip_server_config_left_arm.yaml", episode_1778754577
         "hardware_config_path": hardware_config_folder_path
         + "/single_arm_data_collection_franka.yaml",
