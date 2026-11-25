@@ -68,7 +68,7 @@ class TransformerForActionDiffusion(ModuleAttrMixin):
         # denoising step only), overwritten on every forward() call during a
         # conditional_sample() loop so that whatever is left when the loop ends
         # is the final-step snapshot. Matches ImplicitRDP's Fig. 7 methodology
-        # (transformer_for_diffusion.py: `layer == 0 and timestep.item() == 0`).
+        # (ImplicitRDP's transformer_for_diffusion.py: `layer == 0 and timestep.item() == 0`).
         # Consumed by pop_attention_viz_capture().
         self._captured_cross_attn_snapshot = None
 

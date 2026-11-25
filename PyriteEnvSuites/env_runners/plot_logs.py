@@ -115,7 +115,7 @@ def process_wrench(wrench: np.ndarray,
                    offset_samples: int = WRENCH_OFFSET_SAMPLES,
                    ma_window: int = WRENCH_MA_WINDOW) -> np.ndarray:
     """
-    Apply the same preprocessing used in postprocess_add_virtual_target_label.py:
+    Apply the same preprocessing used in postprocess_dataset.py:
       1. subtract mean of the first `offset_samples` rows (static offset removal)
       2. apply a causal moving-average filter with `ma_window` samples per channel
 

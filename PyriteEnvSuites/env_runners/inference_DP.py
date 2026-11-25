@@ -1,47 +1,19 @@
 """Inference runner for the vision-only Diffusion Policy baseline.
 
-Counterpart of inference_with_logging.py. The ACP runner decodes a 19-dim
-action into a nominal pose, a virtual target and a stiffness scalar, rebuilds a
-6x6 stiffness matrix per waypoint, and schedules both poses and stiffness. This
-one has a 9-dim pose action and nothing else, so it schedules the poses with
-a CONSTANT stiffness.
+Counterpart of inference_ACP_RACP.py. The ACP runner decodes a 19-dim action
+into a nominal pose, a virtual target and a stiffness scalar, and schedules
+poses plus a 6x6 stiffness per waypoint. DP has a 9-dim pose action only, so
+it schedules the poses with a CONSTANT stiffness diag(1300,1300,1300,
+400,400,400) -- ACP's stiff-axis values -- through the same
+IMPEDANCE_CONTROLLER. DP and ACP thus share one controller and one set of
+gains; ACP differs only by softening one axis and shifting its virtual target.
+(A POSITION_CONTROLLER variant was tried and dropped: it went into a
+self-sustained ~1 Hz oscillation.)
 
-CONTROLLER (changed 2026-11-16): DP now runs on ACP's own IMPEDANCE_CONTROLLER
-(torque control), with a constant stiffness diag(1300,1300,1300, 400,400,400)
-scheduled with every chunk -- the values ACP's runner uses on its stiff axes.
-DP and ACP therefore share one controller and one set of gains; ACP differs
-only by softening one axis and shifting its virtual target, which is exactly
-what the force comparison should isolate. The POSITION_CONTROLLER path
-described in the two bullets below was dropped: its tracking leash moved the
-command with the measured pose, which cancelled the damping of Franka's
-internal Cartesian impedance, and the robot went into a self-sustained ~1 Hz,
-up to 6 cm swing at ~0.24 m/s that ignored the command (it kept moving after
-Ctrl+C, and it hid slow_down_factor). Those two bullets are kept as history.
+Other differences from the ACP runner:
 
-What differs from the ACP runner, and why:
-
-  - [HISTORY] POSITION_CONTROLLER, not IMPEDANCE_CONTROLLER. Set by pointing
-    `hardware_config_path` at single_arm_DP_franka.yaml. A vision-only policy
-    emits an absolute pose command meant to be TRACKED; under the impedance
-    controller that command is a spring equilibrium instead, so in contact the
-    robot settles f/K away from it -- 25 mm at K=800 N/m and 20 N. The
-    controller cannot be switched inside a running process (startMotion is
-    called once, at init, and there is no stopMotion), so selection is
-    per-run, by config file.
-
-  - [HISTORY] No stiffness is scheduled. schedule_controls() takes
-    stiffness_matrices_6x6=None. Contact force is bounded instead by the
-    position controller's tracking leash against Franka's internal Cartesian
-    stiffness: |f| <= setCartesianImpedance * max_pose_error_m, which the
-    shipped config sets to 20 N.
-
-  - No chunk-boundary crossfade. inference_with_logging._blend_chunk_boundary
-    exists to smooth the position/stiffness discontinuity created by replanning
-    the whole horizon. Under POSITION_CONTROLLER that job belongs to the
-    controller's own rate limit (max_translation_step_m, applied every 1 kHz
-    cycle), which ramps any setpoint jump in C++ where it can act at full rate
-    rather than at the replanning rate. If you want the crossfade back as well,
-    the nominal-pose half of _blend_chunk_boundary ports over directly.
+  - No chunk-boundary crossfade. The nominal-pose half of
+    inference_ACP_RACP._blend_chunk_boundary ports over directly if needed.
 
   - ModelPredictiveControllerPosition, not ...Hybrid: flat obs dict, wrench and
     timestamp keys dropped, each obs key truncated to its last n_obs_steps.
@@ -98,52 +70,41 @@ control_log_folder_path = os.environ.get("PYRITE_CONTROL_LOG_FOLDERS")
 
 
 def main():
-    # Pick the model at launch instead of editing ckpt_path below:
     #   python inference_DP.py --ckpt <run folder or .ckpt>
     # relative to $PYRITE_CHECKPOINT_FOLDERS (or absolute under it). A run
-    # folder means its checkpoints/latest.ckpt. Without --ckpt, the
-    # ckpt_path written in pipeline_para is used. Same as inference_ACP_RACP.py.
+    # folder means its checkpoints/latest.ckpt. Without --ckpt,
+    # pipeline_para["ckpt_path"] is used.
     parser = argparse.ArgumentParser()
     parser.add_argument("--ckpt", default=None, help="checkpoint to run")
     args = parser.parse_args()
 
     control_para = {
         "raw_time_step_s": 0.001,  # dt of raw data collection. Used to compute time step from time_s such that the downsampling according to shape_meta works.
-        # Upstream eval_real_robot.py: actions play at the demo speed and the
-        # policy replans every steps_per_inference=6 steps (6 x 100 ms =
-        # 0.6 s), each new chunk replacing the tail of the previous one.
-        # slow_down_factor > 1 slows the robot below demo speed, which makes
-        # the 2-frame image history show less motion than in training.
+        # upstream eval_real_robot.py replans every 6 steps at demo speed;
+        # slow_down_factor > 1 makes the 2-frame image history show less
+        # motion than in training
         "slow_down_factor": 3,
         "sparse_execution_horizon": 6,  # steps executed before replanning
-        # Upstream trains with 100 DDIM steps and overrides to 16 at eval
-        # (eval_real_robot.py:104) to cut inference latency.
+        # upstream trains with 100 DDIM steps and uses 16 at eval
         "num_inference_steps": 16,
         "max_duration_s": 3500,
         "pausing_mode": False,
         "device": "cuda",
-        # Constant impedance for every waypoint, [x y z rx ry rz] in N/m and
-        # Nm/rad: ACP's default_stiffness / default_stiffness_rot from
-        # inference_ACP_RACP.py, i.e. ACP's stiff axes. Isotropic, so it is
-        # the same in world and tool frame.
+        # constant stiffness [x y z rx ry rz] (N/m, Nm/rad) = ACP's stiff axes
         "stiffness_diag": [1300, 1300, 1300, 400, 400, 400],
     }
     pipeline_para = {
         "save_low_dim_every_N_frame": 1,
         "save_visual_every_N_frame": 1,
-        # SET ME: the DP checkpoint to evaluate
-        # relative to $PYRITE_CHECKPOINT_FOLDERS, like inference_with_logging.py
+        # relative to $PYRITE_CHECKPOINT_FOLDERS
         "ckpt_path": "/CAP6/E3-DPVSACP/2026.11.15_00.42.02_wipe_gopro177_single_DP_Baseline/checkpoints/latest.ckpt",
-        # NOTE the DP config, not single_arm_data_collection_franka.yaml. It
-        # now selects the same IMPEDANCE_CONTROLLER as ACP (see its header).
         "hardware_config_path": hardware_config_folder_path
         + "/single_arm_DP_franka.yaml",
-        # Each launch logs into its own <date>_<run name>/ subfolder here, one
-        # episode_<id>.zarr per episode, as inference_ACP_RACP.py does.
+        # one <date>_<run name>/ subfolder per launch, one episode_<id>.zarr
+        # per episode
         "control_log_path": control_log_folder_path + "/temp_DP/",
         # also log, per horizon, the camera frames the policy received and the
-        # full robot pose / raw wrench buffers, all with their hardware
-        # timestamps (same keys as inference_ACP_RACP.py).
+        # full robot pose / raw wrench buffers (same keys as ACP)
         "log_observations": True,
     }
     if args.ckpt is not None:
@@ -211,7 +172,7 @@ def main():
         raise RuntimeError(
             f"This runner expects a pose9 action, got {action_dim} dims. "
             "A 19- or 38-dim action is an ACP/RACP policy -- use "
-            "inference_with_logging.py for that."
+            "inference_ACP_RACP.py for that."
         )
     id_list = list(range(action_dim // 9))
     print(f"Vision-only DP policy: action dim {action_dim}, arms {id_list}")
@@ -469,9 +430,7 @@ def main():
                 input("Press Enter to start executing the plotted actions.")
                 action_start_time_s = env.current_hardware_time_s
 
-            # log the whole action (always). No virtual target and no stiffness
-            # here, which is the point of the baseline -- a plot script written
-            # against the ACP logs should branch on the keys it finds.
+            # log the whole action (no virtual target, unlike ACP logs)
             horizon_log = log.create_group(f"horizon_{horizon_count}")
             for id in id_list:
                 horizon_log.create_dataset(
@@ -520,12 +479,11 @@ def main():
                 timestamps=(timestamps + action_start_time_s) * 1000,
             )
 
-            # log what the policy saw, same keys as inference_ACP_RACP.py
-            # (after scheduling, so it adds no delay to the commands). obs_raw
-            # rgb is the env's reused output buffer, so it is copied.
-            # get_pose/get_wrench overwrite the server's stored timestamps,
-            # which is why they are read only now, after the policy's
-            # observation has been taken.
+            # log what the policy saw (after scheduling, so it adds no delay to
+            # the commands). obs_raw rgb is the env's reused output buffer, so
+            # it is copied. get_pose/get_wrench overwrite the server's stored
+            # timestamps, which is why they are read only now, after the
+            # policy's observation has been taken.
             if pipeline_para["log_observations"]:
                 horizon_log.create_dataset(
                     "obs_hardware_time_s", data=horizon_initial_time_s
@@ -578,11 +536,9 @@ def main():
                 if time_s - episode_initial_time_s > control_para["max_duration_s"]:
                     break
 
-        # Stop the robot where it is. Without this, the rest of the last chunk
-        # (16 waypoints x 0.1 s x slow_down_factor) still plays out after
-        # Ctrl+C. One waypoint at the measured pose, 50 ms ahead, replaces
-        # everything queued after it (ManipServer::schedule_waypoints, step b);
-        # the last scheduled stiffness stays in force.
+        # stop the robot where it is, otherwise the rest of the last chunk
+        # still plays out after Ctrl+C: one waypoint at the measured pose,
+        # 50 ms ahead, replaces everything queued after it
         obs_raw = env.get_observation_from_buffer()
         hold_pose7 = np.concatenate(
             [obs_raw[f"ts_pose_fb_{id}"][-1] for id in id_list]
@@ -644,7 +600,6 @@ def main():
 
         print("Continuing to execution.")
     env.cleanup()
-    # end of episode
 
 
 if __name__ == "__main__":

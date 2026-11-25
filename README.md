@@ -10,7 +10,7 @@ This document describes how to setup our whole software system, including python
 
 ### *Just checkout how ACP is implemented*
 You can start with reading the code below:
-* **Compute virtual target & stiffness label:** `adaptive_compliance_policy/PyriteEnvSuites/scripts/postprocess_add_virtual_target_label.py`
+* **Compute virtual target & stiffness label:** `adaptive_compliance_policy/PyriteEnvSuites/scripts/postprocess_dataset.py`
 * **Reconstruct stiffness matrix from policy outputs:** `adaptive_compliance_policy/PyriteEnvSuites/env_runners/virtual_target_real_env_runner.py`
 * **Policy implementation:** `/home/yifanhou/temp/adaptive_compliance_policy/PyriteML/diffusion_policy/policy/diffusion_unet_timm_mod1_policy.py`
 ### *Train an ACP*
@@ -146,7 +146,7 @@ We postprocess the data to match the data format for training and compute the vi
 1. Convert to zarr format using `adaptive_compliance_policy/PyriteUtility/data_pipeline/real_data_processing.py`.
 Specify `id_list`, `input_dir`, `output_dir` then run the script. This script will compress the images into a [zarr](https://zarr.dev/) database, then generate meta data for the whole dataset. This step creates a new folder at `output_dir`.
 
-2. Generate virtual target labels using `adaptive_compliance_policy/PyriteEnvSuites/scripts/postprocess_add_virtual_target_label.py`
+2. Generate virtual target labels using `adaptive_compliance_policy/PyriteEnvSuites/scripts/postprocess_dataset.py`
 Specify `id_list` and `dataset_path`, then run the script. You can set `flag_plot=True` to check 3D visualizations of the reference/virtual target trajectories, episode by episode.
 This step does not create a new folder, instead, it only adds new fields to the input dataset.
 

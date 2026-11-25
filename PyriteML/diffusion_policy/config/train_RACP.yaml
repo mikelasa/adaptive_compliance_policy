@@ -88,7 +88,7 @@ policy:
     contact_gate_threshold_high: 8.0  # N -- opening (upper) bound of the
       # hysteresis band.
       # both originally from stiffness_estimation_para in
-      # PyriteEnvSuites/scripts/postprocess_add_virtual_target_label_clipped.py
+      # PyriteEnvSuites/scripts/postprocess_dataset.py
 
     vision_encoder_cfg:
       model_name: 'vit_base_patch32_clip_224.openai'

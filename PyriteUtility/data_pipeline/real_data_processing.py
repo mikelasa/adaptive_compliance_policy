@@ -245,9 +245,7 @@ def process_one_episode(root, episode_name, input_dir, id_list, camera_id_list):
     #    and backwards, giving the same attenuation with zero phase.
     #
     # Note this does not remove oscillations below the corner. A ~4 Hz contact
-    # instability still reaches the label almost intact; see
-    # PyriteEnvSuites/scripts/analyze_label_filter_cutoff.py to measure what a
-    # given episode actually passes through.
+    # instability still reaches the label almost intact.
     FORCE_FILTER_CUTOFF_HZ = 5
     FORCE_FILTER_ORDER = 5
     data_wrench_filtered = []
@@ -372,4 +370,4 @@ for id in camera_id_list:
     meta[f"episode_rgb{id}_len"] = zarr.array(episode_rgb_len[id])
 
 print(f"All done! Generated {count} episodes in {output_dir}")
-print("The only thing left is to run postprocess_add_virtual_target_label.py")
+print("The only thing left is to run postprocess_dataset.py")

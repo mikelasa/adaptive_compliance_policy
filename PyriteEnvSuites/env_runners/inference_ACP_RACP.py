@@ -44,39 +44,28 @@ control_log_folder_path = os.environ.get("PYRITE_CONTROL_LOG_FOLDERS")
 
 
 def _cosine_alpha(window):
-    """Raised-cosine crossfade weights for the OLD chunk, one per blended
-    step (index 0 = right at the replanning boundary, index window-1 = the
-    far end of the blend region).
+    """Raised-cosine crossfade weights for the OLD chunk, one per blended step:
+    alpha[j] = 0.5 * (1 + cos(pi * (j+1) / (window+1))).
 
-    alpha[j] = 0.5 * (1 + cos(pi * (j+1) / (window+1)))
-
-    Goes smoothly from near-1 (trust the old, already-executing chunk) to
-    near-0 (trust the freshly predicted chunk) with ~zero slope at both
-    ends, so the blended trajectory's velocity/stiffness-rate stays
-    continuous across the seam too, not just its position -- unlike a plain
-    linear ramp, which kinks the derivative at both window edges.
+    Goes from ~1 (old chunk) to ~0 (new chunk) with ~zero slope at both ends,
+    so velocity stays continuous across the seam (a linear ramp would kink it).
     """
     j = np.arange(window)
     return 0.5 * (1.0 + np.cos(np.pi * (j + 1) / (window + 1)))
 
 
 def _slerp_safe(q_old, q_new, t):
-    """Slerp between two wxyz (scalar-first) unit quaternions, weight t in
-    [0, 1] toward q_new. Always takes the shortest arc (flips q_new's sign
-    if the dot product is negative) and falls back to nlerp+normalize when
-    the two quaternions are (nearly) identical -- the two consecutively
-    predicted chunks agreeing closely on orientation at a given step is a
-    completely normal case here, not a rare edge case, and true slerp is
-    singular there (sin(theta_0) -> 0): spatialmath's UnitQuaternion.interp()
-    divides by zero in exactly this situation, so it is not used directly.
+    """Slerp between two wxyz unit quaternions, weight t in [0, 1] toward
+    q_new. Takes the shortest arc and falls back to nlerp when the two are
+    nearly identical, where slerp is singular (spatialmath's
+    UnitQuaternion.interp() divides by zero there, so it is not used).
     """
     dot = float(np.dot(q_old, q_new))
     if dot < 0:
         q_new = -q_new
         dot = -dot
     dot = np.clip(dot, -1.0, 1.0)
-    if dot > 0.9995:  # nearly parallel -- slerp is numerically unstable here,
-        # and indistinguishable from nlerp at this closeness anyway.
+    if dot > 0.9995:  # nearly parallel: nlerp
         out = (1.0 - t) * q_old + t * q_new
         return out / np.linalg.norm(out)
     theta_0 = np.arccos(dot)
@@ -86,39 +75,25 @@ def _slerp_safe(q_old, q_new, t):
     return s0 * q_old + s1 * q_new
 
 
-# A/B test toggle: left-side box approaches seem to under-rotate, and the
-# crossfade below is the newest thing in the replanning loop (absent from
-# the older virtual_target_real_env_runner.py, which sends each chunk raw).
-# Flip to False to send each freshly-diffused chunk through unblended, as
-# that older script did, and see whether reach/rotation comes back.
+# False sends each predicted chunk unblended.
 ENABLE_CHUNK_BOUNDARY_BLEND = True
 
 
 def _blend_chunk_boundary(prev_chunk, blend_window, nominal, virtual, stiffness):
-    """Crossfade the start of a freshly-predicted action chunk against the
-    tail of the previously *sent* chunk, to remove the periodic
-    position/stiffness discontinuity caused by replanning the whole horizon
-    from fresh diffusion noise every cycle (pausing_mode=False sends the
-    full sparse_action_horizon chunk every execution_duration_s, but only
-    the first sparse_execution_horizon steps were meant to actually run
-    before the next chunk arrives and overwrites the rest -- the remaining
-    steps are free, already-computed margin, reused here as the blend
-    window instead of being silently discarded).
+    """Crossfade the start of a new action chunk against the unexecuted tail
+    of the previously sent chunk, removing the position/stiffness jump at
+    each replanning boundary.
 
-    prev_chunk: dict {"nominal", "virtual", "stiffness"} holding the
-        previous cycle's post-blend (i.e. actually-sent) chunk for one id,
-        or None on the first horizon of an episode -- nothing to blend
-        against yet, so the new chunk passes through unchanged.
-    blend_window: number of leading steps of the new chunk to blend
-        (sparse_action_horizon - sparse_execution_horizon steps -- the
-        margin that was predicted-but-discarded last cycle).
-    nominal, virtual: (N, 7) pos3(0:3) + quat4 wxyz(3:7) arrays for this
-        cycle (nominal = target, virtual = virtual target).
-    stiffness: (6, 6*N) array for this cycle.
+    prev_chunk: dict {"nominal", "virtual", "stiffness", "exec_h"} with the
+        previous cycle's sent chunk, or None on an episode's first horizon
+        (the new chunk then passes through unchanged).
+    blend_window: leading steps of the new chunk to blend
+        (sparse_action_horizon - sparse_execution_horizon).
+    nominal, virtual: (N, 7) pos3 + quat4 wxyz.
+    stiffness: (6, 6*N).
 
-    Returns the blended (nominal, virtual, stiffness) with the same shapes
-    as the inputs. Caller is responsible for stashing the return value as
-    the new prev_chunk for next cycle.
+    Returns the blended (nominal, virtual, stiffness), same shapes. The caller
+    stores the result as the next prev_chunk.
     """
     if prev_chunk is None or not ENABLE_CHUNK_BOUNDARY_BLEND:
         return nominal, virtual, stiffness
@@ -134,10 +109,8 @@ def _blend_chunk_boundary(prev_chunk, blend_window, nominal, virtual, stiffness)
     virtual = virtual.copy()
     stiffness = stiffness.copy()
 
-    # The previous chunk's steps [exec_h : exec_h+window] were predicted but
-    # never executed (replanning happened first) -- they cover the same
-    # real-world timestamps as this new chunk's steps [0:window], so that's
-    # what we blend against.
+    # prev steps [exec_h : exec_h+window] were never executed and cover the
+    # same timestamps as the new steps [0:window]
     prev_nominal_tail = prev_chunk["nominal"][exec_h : exec_h + window]
     prev_virtual_tail = prev_chunk["virtual"][exec_h : exec_h + window]
     prev_stiffness_tail = prev_chunk["stiffness"][:, 6 * exec_h : 6 * (exec_h + window)]
@@ -149,17 +122,11 @@ def _blend_chunk_boundary(prev_chunk, blend_window, nominal, virtual, stiffness)
         nominal[j, :3] = a * prev_nominal_tail[j, :3] + (1.0 - a) * nominal[j, :3]
         virtual[j, :3] = a * prev_virtual_tail[j, :3] + (1.0 - a) * virtual[j, :3]
 
-        # orientation (pose7 quat is wxyz, scalar-first): slerp from old to
-        # new, weighted by (1-a) so a=0 (fully new) recovers the new
-        # quaternion exactly and a=1 (fully old, at the boundary) recovers
-        # the old one.
+        # orientation: slerp old -> new with weight (1-a)
         nominal[j, 3:7] = _slerp_safe(prev_nominal_tail[j, 3:7], nominal[j, 3:7], 1.0 - a)
         virtual[j, 3:7] = _slerp_safe(prev_virtual_tail[j, 3:7], virtual[j, 3:7], 1.0 - a)
 
-        # stiffness: linear elementwise blend of the two 6x6 matrices (a
-        # convex combination of two PSD-ish matrices stays well-behaved,
-        # even though it doesn't re-derive the compliance direction from a
-        # blended virtual target).
+        # stiffness: linear elementwise blend of the 6x6 matrices
         stiffness[:, 6 * j : 6 * j + 6] = (
             a * prev_stiffness_tail[:, 6 * j : 6 * j + 6]
             + (1.0 - a) * stiffness[:, 6 * j : 6 * j + 6]
@@ -169,11 +136,10 @@ def _blend_chunk_boundary(prev_chunk, blend_window, nominal, virtual, stiffness)
 
 
 def main():
-    # Pick the model at launch instead of editing ckpt_path below:
-    #   python inference_with_logging_worldframe.py --ckpt <run folder or .ckpt>
+    #   python inference_ACP_RACP.py --ckpt <run folder or .ckpt>
     # relative to $PYRITE_CHECKPOINT_FOLDERS (or absolute under it). A run
-    # folder means its checkpoints/latest.ckpt. Without --ckpt, the
-    # ckpt_path written in pipeline_para is used, as before.
+    # folder means its checkpoints/latest.ckpt. Without --ckpt,
+    # pipeline_para["ckpt_path"] is used.
     parser = argparse.ArgumentParser()
     parser.add_argument("--ckpt", default=None, help="checkpoint to run")
     args = parser.parse_args()
@@ -189,23 +155,14 @@ def main():
     pipeline_para = {
         "save_low_dim_every_N_frame": 1,
         "save_visual_every_N_frame": 1,
-        #"ckpt_path": "/CAP4/flip/2026.09.16-22.20.09_ACP_Unet_full/checkpoints/latest.ckpt",
         "ckpt_path": "/2026.11.19_08.35.44_switch_50_demos_RACP_SWITCH_$_RACP_full/checkpoints/latest.ckpt",
-        #"ckpt_path": "/CAP6/E1-camaras/dual_camera/2026.11.08_22.44.22_flipup_100_demos_gopro177_DCAM_ACP_Baseline/checkpoints/latest.ckpt",
-        # "hardware_config_path": hardware_config_folder_path + "/manip_server_config_left_arm.yaml", episode_1778754577
         "hardware_config_path": hardware_config_folder_path
         + "/single_arm_data_collection_franka.yaml",
-        # separate from inference_with_logging.py's "/temp/": zarr opens the
-        # log with mode="w", so sharing the path would wipe the tool-frame
-        # baseline run that this variant is meant to be compared against.
-        # Each launch logs into its own <date>_<run name>/ subfolder here, one
-        # episode_<id>.zarr per episode (as inference_with_logging_DP.py does),
-        # so trials of different checkpoints are kept side by side.
+        # one <date>_<run name>/ subfolder per launch, one episode_<id>.zarr
+        # per episode
         "control_log_path": control_log_folder_path + "/temp_worldframe/",
         # also log, per horizon, the camera frames the policy received and the
-        # full robot pose / raw wrench buffers, all with their hardware
-        # timestamps: enough to compare trial images against the training
-        # data and to measure camera latency in closed loop.
+        # full robot pose / raw wrench buffers, with hardware timestamps
         "log_observations": True,
     }
     if args.ckpt is not None:
@@ -296,8 +253,6 @@ def main():
     env_camera_id_list = shape_meta.get("camera_id_list", None)
 
     # create the env
-    # Manip server makes the communication with the real hardware posible through manip server
-    # and pybind11
     env = ManipServerEnv(
         camera_res_hw=(image_height, image_width),
         hardware_config_path=pipeline_para["hardware_config_path"],
@@ -311,7 +266,6 @@ def main():
 
     # policy doesnt need to control robot each ms, controlling every 10ms is enough
     # time steps are computed so that control is applied at the right time
-    # set timestep
     p_timestep_s = control_para["raw_time_step_s"]
     # how many timesteps between each action step
     sparse_action_down_sample_steps = shape_meta["sample"]["action"]["sparse"][
@@ -369,12 +323,10 @@ def main():
     # sets a time offset between env time and controller time to align
     controller.set_time_offset(env)
 
-    # timestep_idx = 0
-    # stiffness = None
     # gets time from env (robot time)
     episode_initial_time_s = env.current_hardware_time_s
 
-    #computes the time needed to execute one horizon by the MPC (180 ms)
+    # computes the time needed to execute one horizon by the MPC
     execution_duration_s = (
         sparse_execution_horizon * p_timestep_s * control_para["slow_down_factor"]
     )
@@ -384,19 +336,14 @@ def main():
         plt.ion()  # Enable interactive mode
         fig = plt.figure(figsize=(10, 8))
         ax = fig.add_subplot(111, projection='3d')
-
-        # Don't plot dummy data or call plt.show() here
-        # Just set up the axes
         ax.set_xlabel("X")
         ax.set_ylabel("Y")
         ax.set_zlabel("Z")
         ax.set_title("Trajectory Visualization")
-
-        # Show non-blocking
         plt.show(block=False)
         plt.pause(0.001)
 
-    # real-time force norm plot (~10s rolling window at ~5Hz update rate)
+    # live force/torque norm plot, rolling window of the last 50 horizons
     _force_window = 50
     _force_norm_history = deque(maxlen=_force_window)
     _torque_norm_history = deque(maxlen=_force_window)
@@ -423,9 +370,8 @@ def main():
         _fig_f.canvas.flush_events()
 
     # log: one folder per launch, named after the checkpoint's training run,
-    # holding one episode_<id>.zarr per episode (opened in the episode loop).
-    # Nothing is opened with mode="w" at the top level any more, so earlier
-    # launches are never wiped.
+    # holding one episode_<id>.zarr per episode (opened in the episode loop),
+    # so earlier launches are never overwritten.
     ckpt_run_name = pipeline_para["ckpt_path"].split("/checkpoints/")[0].strip("/")
     run_log_dir = os.path.join(
         pipeline_para["control_log_path"],
@@ -480,19 +426,15 @@ def main():
         log.attrs["hardware_config_path"] = pipeline_para["hardware_config_path"]
         log.attrs["control_para"] = control_para
         horizon_count = 0
-        # Boundary-blend state (see _blend_chunk_boundary): the previous
-        # cycle's post-blend (actually-sent) chunk, per id. Scoped to this
-        # episode's while-loop so it's automatically None again at the start
-        # of every new episode -- a fresh episode must never be blended
-        # against the previous episode's leftover trajectory.
+        # previous sent chunk per id for _blend_chunk_boundary; reset every
+        # episode so nothing is blended against the last episode
         prev_chunks = [None] * len(id_list)
         while not killer.kill_now:
             # get current hardware time
             horizon_initial_time_s = env.current_hardware_time_s
             printOrNot(vbs_h1, "Starting new horizon at ", horizon_initial_time_s)
 
-            # get observation from env
-            # takes rgb images, ts poses, wrenches anda processes them into a dictionary
+            # get observation from env (rgb, ts poses, wrenches)
             obs_raw = env.get_observation_from_buffer()
 
             # plot the rgb image
@@ -506,8 +448,7 @@ def main():
             # update force plot with latest filtered wrench (robot 0)
             _update_force_plot(obs_raw["wrench_0"][-1])
 
-            # save low dim obs named as raw in new dict called obs_task
-            # function change format and names of obs
+            # convert raw obs to the policy's obs format
             obs_task = dict()
             raw_to_obs(obs_raw, obs_task, shape_meta)
 
@@ -516,12 +457,9 @@ def main():
             # set observation applies downsampling according to shape_meta
             controller.set_observation(obs_task["obs"])
 
-            # inference: add batch size 
-            (action_sparse_target_mats, action_sparse_vt_mats, 
+            # inference
+            (action_sparse_target_mats, action_sparse_vt_mats,
              action_stiffnesses, ) = controller.compute_sparse_control(device)
-
-            # for id in id_list:
-            #     print(f"Stiffness {id}: ", action_stiffnesses[id])
 
             # decode stiffness matrix
             outputs_ts_nominal_targets = [np.array] * len(id_list)
@@ -544,54 +482,28 @@ def main():
                     SE3_virtual_target = action_sparse_vt_mats[id][i].reshape([4, 4])
                     stiffness = action_stiffnesses[id][i]
 
-                    # stiffness: 1. compliance direction, in the WORLD frame.
-                    # delta = virtual_target - target is world-frame on both
-                    # sides of training: the label pipeline estimates the
-                    # penetration in the tool frame but stores the virtual
-                    # target as a world pose (SE3_WC = SE3_WT * SE3_TC in
-                    # postprocess_add_virtual_target_label.py), and the policy
-                    # predicts world poses. The impedance controller likewise
-                    # multiplies K by a world-frame error
-                    # (pose_error = pose_fb_trans - pose_ref_trans), so K has
-                    # to be built in world frame for its soft axis to land on
-                    # delta.
-                    #
-                    # The original script converted both poses into the tool
-                    # frame here. That was correct for the UR5 admittance
-                    # controller, which multiplies K by a tool-frame error
-                    # (spt_TTadj = SE32spt(SE3Inv(SE3_WT) * SE3_WTadj)), but
-                    # against this impedance controller it aims the soft axis
-                    # at a tool-frame vector while the error it multiplies is
-                    # world-frame -- measured on a 135-horizon log, that made
-                    # the stiffness actually applied along delta 1.74x the
-                    # predicted scalar (median), saturating at the 1300 N/m
-                    # perpendicular default, i.e. no compliance at all along
-                    # the direction that matters.
+                    # compliance direction in the WORLD frame: virtual target
+                    # labels are world poses and the impedance controller
+                    # multiplies K by a world-frame pose error (the original
+                    # tool-frame version was only correct for the UR5
+                    # admittance controller).
                     compliance_direction = (
                         SE3_virtual_target[:3, 3] - SE3_target[:3, 3]
                     ).reshape(3)
 
                     # if the two are too close, set X direction
-                    if np.linalg.norm(compliance_direction) < 0.001:  #
+                    if np.linalg.norm(compliance_direction) < 0.001:
                         compliance_direction = np.array([1.0, 0.0, 0.0])
 
                     # normalize
                     compliance_direction /= np.linalg.norm(compliance_direction)
 
-                    # build orthonormal basis
-                    # sets compliance direction as X axis
+                    # orthonormal basis with the compliance direction as X.
+                    # K depends on X alone, so the reference axis is free: use
+                    # the world axis least aligned with X so cross(X, ref)
+                    # never vanishes (a fixed Z would give NaNs when pressing
+                    # straight down).
                     X = compliance_direction
-                    # Any orthonormal completion of X gives the same K: M below
-                    # is diag(k, 1300, 1300), isotropic in the plane normal to
-                    # X, so K = k*X X' + 1300*(I - X X') depends on X alone.
-                    # The reference axis is therefore free -- but cross(X, ref)
-                    # vanishes when X || ref, which would make Y all-NaN and
-                    # send a NaN stiffness matrix to the robot. The old code
-                    # used a fixed [0, 0, 1], safe only because X was a
-                    # tool-frame vector. In world frame X || Z means pressing
-                    # straight down, which for flip-up is a common case rather
-                    # than an unreachable one, so pick the world axis least
-                    # aligned with X (|cross| >= sqrt(2/3) by construction).
                     ref = np.zeros(3)
                     ref[np.argmin(np.abs(X))] = 1.0
                     Y = np.cross(X, ref)
@@ -619,11 +531,7 @@ def main():
                 outputs_ts_targets[id] = ts_targets_virtual
                 outputs_ts_stiffnesses[id] = ts_stiffnesses
 
-                # crossfade the start of this freshly-diffused chunk against
-                # the tail of the previously *sent* one, to remove the
-                # replanning-boundary bump (see _blend_chunk_boundary). No
-                # effect on the first horizon of an episode (prev_chunks[id]
-                # is None then).
+                # smooth the replanning boundary (see _blend_chunk_boundary)
                 (
                     outputs_ts_nominal_targets[id],
                     outputs_ts_targets[id],
@@ -817,28 +725,12 @@ def main():
                         data=env.server.get_wrench_timestamps_ms(id) / 1000,
                     )
 
-            # # log the truncated action
-            # horizon_log = log.create_group(f"horizon_{horizon_count}")
-            # horizon_log.create_dataset("ts_targets", data=outputs_ts_targets)
-            # horizon_log.create_dataset("timestamps", data=timestamps * 1000)
-            # horizon_log.create_dataset("ts_stiffnesses", data=outputs_ts_stiffnesses)
-            # horizon_log.create_dataset(
-            #     "timestamps_s", data=timestamps + action_start_time_s
-            # )
             horizon_count += 1
 
             if control_para["pausing_mode"]:
                 c = input("Press Enter to start the next horizon. q to quit.")
                 if c == "q":
                     break
-
-            # # log
-            # if warming_up_done:
-            #     if timestep_idx % pipeline_para["save_low_dim_every_N_frame"] == 0:
-            #         env.add_low_dim_observation(None, ts_target, time_s)
-            #         # env.add_optional_observation(stiffness)
-            #     if timestep_idx % pipeline_para["save_visual_every_N_frame"] == 0:
-            #         env.add_visual_observation(time_s)
 
             # checks if need to sleep to wait for the execution to finish for this horizon
             time_s = env.current_hardware_time_s
@@ -903,7 +795,6 @@ def main():
 
         print("Continuing to execution.")
     env.cleanup()
-    # end of episode
 
 
 if __name__ == "__main__":
