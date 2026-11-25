@@ -209,3 +209,237 @@ class ModelPredictiveControllerHybrid():
         return self.sparse_target_mats, self.sparse_vt_mats
 
 # fmt: on
+
+# fmt: off
+class ModelPredictiveControllerPosition():
+    """Class that maintains IO buffering of a MPC controller with a vision-only policy.
+
+    Twin of ModelPredictiveControllerHybrid. It differs only where the policy
+    interface differs, and nowhere else -- same observation buffering, same
+    downsampling, same relative-pose conversion, same time-offset handling:
+
+      - Observations reach the policy as a FLAT dict, with the wrench and
+        timestamp keys dropped and every remaining key truncated to its LAST
+        n_obs_steps. That is exactly what DPAdapterDataset does to the training
+        batches, so the policy sees the same shapes online as it did offline.
+        The relative-pose conversion still runs over the FULL task shape_meta
+        horizons first, and the truncation happens after -- same order as
+        training, where the dataset converts and the adapter then slices.
+
+      - predict_action() returns {'action', 'action_pred'} rather than
+        {'sparse'}. The whole predicted horizon is taken from 'action_pred';
+        'action' holds only the first n_action_steps.
+
+      - The action is 9-dim pose9 per arm, so there is no virtual target to
+        unpack and no stiffness to decode. Under POSITION_CONTROLLER there is
+        nothing to schedule stiffness into in any case.
+
+    args:
+        shape_meta: the FULL task shape_meta (cfg.task.shape_meta). Drives the
+            observation horizons, downsampling and relative-pose conversion.
+        policy_shape_meta: what the policy network sees (cfg.shape_meta). Its
+            'obs' keys select which observations survive; its 'action' shape
+            must be 9 per arm.
+        id_list: arm ids.
+        policy: the loaded policy.
+        n_obs_steps: how many steps of each observation the policy expects.
+        action_to_trajectory: optional. Only used by update_control(); the live
+            runner calls set_observation() + compute_sparse_control() and builds
+            its own waypoints, so it may be left as None.
+        sparse_execution_horizon: MPC execution horizon in number of steps.
+    """
+    def __init__(self,
+        shape_meta,
+        policy_shape_meta,
+        id_list,
+        policy,
+        n_obs_steps,
+        action_to_trajectory: Optional[Callable[[np.ndarray], Callable]] = None,
+        sparse_execution_horizon=10,
+    ):
+        print("[MPC-Position] Initializing")
+        self.shape_meta = shape_meta
+        self.policy_shape_meta = policy_shape_meta
+        self.id_list = id_list
+
+        action_dim = policy_shape_meta['action']['shape'][0]
+        if action_dim != 9 * len(id_list):
+            raise RuntimeError(
+                f"[MPC-Position] policy action dim is {action_dim}, expected "
+                f"{9 * len(id_list)} (9 per arm for {len(id_list)} arm(s)). "
+                "A 19- or 38-dim action is an ACP policy; use "
+                "ModelPredictiveControllerHybrid for that."
+            )
+        self.action_postprocess = task.action9_postprocess
+
+        # which observation keys the policy takes, in the order its shape_meta
+        # declares them. Anything not listed here -- wrench, timestamps -- is
+        # dropped, which is what makes this policy vision-only.
+        self.policy_obs_keys = list(policy_shape_meta['obs'].keys())
+        for key in self.policy_obs_keys:
+            if key not in shape_meta['sample']['obs']['sparse']:
+                raise RuntimeError(
+                    f"[MPC-Position] policy wants obs key '{key}' but the task "
+                    "shape_meta does not sample it"
+                )
+        print("[MPC-Position] policy obs keys:", self.policy_obs_keys)
+        dropped = [k for k in shape_meta['sample']['obs']['sparse']
+                   if k not in self.policy_obs_keys]
+        print("[MPC-Position] dropped obs keys:", dropped)
+
+        self.policy = policy
+        self.n_obs_steps = n_obs_steps
+        self.sparse_execution_horizon_time_step = sparse_execution_horizon
+        self.action_to_trajectory = action_to_trajectory
+
+        # internal variables
+        self.time_offset = None
+        self.sparse_obs_data = {}
+        self.sparse_obs_last_timestamps = {}
+        self.horizon_start_time_step = -np.inf
+        self.sparse_action_traj = []
+        self.SE3_WBase = None
+        self.verbose_level = -1
+
+        self.sparse_target_mats = None
+
+        print("[MPC-Position] Done initializing")
+
+
+    def set_time_offset(self, hardware):
+        '''
+        Set time offset such that timing in this controller is aligned with hardware time.
+        hardware: a class with a property 'current_hardware_time_s'
+        '''
+        self.time_offset = hardware.current_hardware_time_s - time.perf_counter()
+
+    def set_observation(self, obs_task):
+        # Downsample over the full task horizons, exactly as the Hybrid
+        # controller does. The wrench keys are still buffered here because
+        # sparse_obs_to_obs_sample reads them while solving the relative
+        # wrench; they are dropped later, before the policy sees anything.
+        for key, attr in self.shape_meta['sample']['obs']['sparse'].items():
+            data = obs_task[key]
+            horizon = attr['horizon']
+            down_sample_steps = attr['down_sample_steps']
+            # sample 'horizon' number of latest obs from the queue
+            assert len(data) >= (horizon-1) * down_sample_steps + 1
+            self.sparse_obs_data[key] = data[-(horizon-1) * down_sample_steps - 1::down_sample_steps]
+
+        for id in self.id_list:
+            self.sparse_obs_last_timestamps[f"rgb_time_stamps_{id}"] = obs_task[f"rgb_time_stamps_{id}"][-1]
+            self.sparse_obs_last_timestamps[f"robot_time_stamps_{id}"] = obs_task[f"robot_time_stamps_{id}"][-1]
+            self.sparse_obs_last_timestamps[f"wrench_time_stamps_{id}"] = obs_task[f"wrench_time_stamps_{id}"][-1]
+
+    def compute_sparse_control(self, device):
+        """ Run model inference once. Does not output control.
+
+        Returns a list of (T, 4, 4) absolute pose matrices, one per arm.
+        """
+        # time alignment check
+        time_now = time.perf_counter() + self.time_offset
+        for id in self.id_list:
+            dt_rgb = time_now - self.sparse_obs_last_timestamps[f"rgb_time_stamps_{id}"]
+            dt_ts_pose = time_now - self.sparse_obs_last_timestamps[f"robot_time_stamps_{id}"]
+            print(f'[MPC-Position] obs lagging for robot {id}: dt_rgb: {dt_rgb}, dt_ts_pose: {dt_ts_pose}')
+
+        # run model inference
+        with torch.no_grad():
+            s = time.time()
+
+            # convert sparse observations to model input format
+            # RGB: unpack, reshape, normalize, turn into float
+            # low dim: convert pose to relative pose, turn into float
+            #
+            # Run over the full task shape_meta, so the relative-pose base is
+            # the same frame training used, then reduce to the policy's keys.
+            obs_full_np, SE3_WBase = task.sparse_obs_to_obs_sample(
+                obs_sparse=self.sparse_obs_data,
+                shape_meta=self.shape_meta,
+                reshape_mode='reshape',
+                id_list=self.id_list,
+                ignore_rgb=False,
+            )
+            self.SE3_WBase = SE3_WBase
+
+            # DPAdapterDataset equivalent: keep the policy's keys only, and
+            # take the TAIL of each so the most recent frame is always included
+            obs_sample_np = {}
+            for key in self.policy_obs_keys:
+                value = obs_full_np[key]
+                assert value.shape[0] >= self.n_obs_steps, (
+                    f"[MPC-Position] obs key {key} has horizon {value.shape[0]}, "
+                    f"shorter than n_obs_steps={self.n_obs_steps}"
+                )
+                obs_sample_np[key] = value[-self.n_obs_steps:]
+
+            # add batch dimension
+            obs_sample_np = dict_apply(obs_sample_np,
+                lambda x: rearrange(x, '... -> 1 ...'))
+            # convert to torch tensor
+            obs_sample = dict_apply(obs_sample_np,
+                lambda x: torch.from_numpy(x).to(device))
+
+            # inference
+            result = self.policy.predict_action(obs_sample)
+            # 'action_pred' is the whole predicted horizon; 'action' is only
+            # the first n_action_steps of it
+            raw_action = result['action_pred'][0].detach().to('cpu').numpy()
+
+            # from relative action to absolute action
+            action = self.action_postprocess(raw_action, SE3_WBase, self.id_list)
+            self.sparse_target_mats = action
+            printOrNot(self.verbose_level, 'Sparse inference latency:', time.time() - s)
+            return action
+
+    def update_control(self, time_step, device):
+        """ Update control per time step.
+
+        Kept for parity with ModelPredictiveControllerHybrid. The live runner
+        does not use this path -- it calls compute_sparse_control() and builds
+        its own waypoints -- so action_to_trajectory may be None, in which case
+        this raises rather than failing obscurely later.
+        """
+        if self.action_to_trajectory is None:
+            raise RuntimeError(
+                "[MPC-Position] update_control() needs action_to_trajectory "
+                "(e.g. PyriteEnvSuites.utils.env_utils.pose9_to_traj); it was "
+                "constructed as None"
+            )
+
+        sparse_action_horizon = self.shape_meta['sample']['action']['sparse']['horizon']
+        sparse_action_down_sample_steps = self.shape_meta['sample']['action']['sparse']['down_sample_steps']
+
+        if time_step > self.horizon_start_time_step + self.sparse_execution_horizon_time_step:
+            # time for a new horizon
+
+            # TODO: replace this mechanism with multi-threading, remove these two variables
+            time0 = time.perf_counter()
+            p_timestep_s = 0.01 # 0.002
+
+            self.sparse_target_mats = self.compute_sparse_control(device)
+
+            sparse_action_timesteps = np.arange(0, sparse_action_horizon) * sparse_action_down_sample_steps
+            self.sparse_action_traj = self.action_to_trajectory(
+                action_mats = self.sparse_target_mats[0],
+                time_steps = sparse_action_timesteps)
+
+            time1 = time.perf_counter()
+
+            self.horizon_start_time_step = time_step + (time1 - time0 - 0.012) / p_timestep_s
+
+            print("[MPC-Position debug] new horizon start time step: ", self.horizon_start_time_step, ", computation takes: ", time1 - time0, "s")
+            return None # indicates a new horizon has started
+
+
+        time_now = time_step - self.horizon_start_time_step
+        print("[MPC-Position debug] time_step in horizon: ", time_now)
+        time_now = max(time_now, 0)
+        target_now = self.sparse_action_traj(time_now)
+        return target_now
+
+    def get_SE3_targets(self):
+        return self.sparse_target_mats
+
+# fmt: on
+

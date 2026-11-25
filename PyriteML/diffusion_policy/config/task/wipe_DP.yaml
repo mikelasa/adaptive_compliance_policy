@@ -1,0 +1,173 @@
+name: wipe_${task.dataset_name}
+
+# Task config for the vanilla Diffusion Policy baseline.
+#
+# Timing follows upstream DP (real-stanford, real_pusht_image + the real-robot
+# UNet recipe), NOT wipe.yaml: everything runs on upstream's 10 Hz grid.
+# Upstream records at 10 Hz; ours is robot/wrench 1 kHz and camera 30 fps, so
+# 100 ms is 100 robot samples or 3 camera frames (3 x 33.2 ms = 99.5 ms).
+#
+#                        upstream DP           here
+#   action step / horiz  100 ms x 16 = 1.6 s   100 x 1 ms x 16 = 1.6 s
+#   rgb obs              2 frames, 100 ms      2 frames, 3 x 33.2 ms
+#   low_dim obs          2 steps, 100 ms       2 steps, 100 x 1 ms
+#   query (sample) rate  every 100 ms step     every 3rd rgb frame
+#
+# Consequence: the DP no longer sees the same samples as ACP (wipe.yaml:
+# 50 ms actions, rgb 333 ms apart, pose 5 ms apart). Same demos and same
+# train/val episode split (seed 42, val_ratio 0.05), different windows.
+# The inference runner reads these step sizes from the checkpoint, so they
+# also set the waypoint spacing on the robot.
+#
+# Left as in ACP: poses are relative (obs to the latest pose, actions to the
+# first action frame) where upstream's are absolute; and action[0] is "now"
+# where upstream's window starts To-1 = 1 step earlier. Both are consistent
+# between training and inference, so they are not mismatches.
+#
+# DPAdapterDataset drops the wrench and timestamp keys, truncates each obs key
+# to its last n_obs_steps, and slices the 19-dim action down to the 9-dim
+# nominal pose command. `policy_shape_meta` is what the DP policy and
+# MultiImageObsEncoder actually see: vision + proprioception in, pose9 out.
+
+sparse_obs_rgb_down_sample_steps: 3     # 30 fps -> 99.5 ms apart (upstream 100 ms)
+sparse_obs_rgb_horizon: 2               # = n_obs_steps
+
+sparse_obs_low_dim_down_sample_steps: 100   # 1 kHz -> 100 ms apart
+sparse_obs_low_dim_horizon: 2               # = n_obs_steps
+
+# sampled but dropped by DPAdapterDataset (vision-only); left at ACP's values.
+sparse_obs_wrench_down_sample_steps: 4
+sparse_obs_wrench_horizon: 32
+
+sparse_action_down_sample_steps: 100    # 1 kHz -> 100 ms per action (upstream dt=0.1)
+sparse_action_horizon: 16               # = horizon in train_DP.yaml, 1.6 s
+
+n_obs_steps: 2
+
+
+shape_meta: &shape_meta
+  id_list: [0]
+  camera_id_list: [0]
+  raw:
+    rgb_0:
+      shape: [3, 224, 224]
+      type: rgb
+    ts_pose_fb_0:
+      shape: [7]
+      type: low_dim
+    ts_pose_command_0:
+      shape: [7]
+      type: low_dim
+    ts_pose_virtual_target_0:
+      shape: [7]
+      type: low_dim
+    stiffness_0:
+      shape: [1]
+      type: low_dim
+    wrench_0:
+      shape: [6]
+      type: low_dim
+    rgb_time_stamps_0:
+      shape: [1]
+      type: timestamp
+    robot_time_stamps_0:
+      shape: [1]
+      type: timestamp
+    wrench_time_stamps_0:
+      shape: [1]
+      type: timestamp
+
+  obs:
+    rgb_0:
+      shape: [3, 224, 224]
+      type: rgb
+    robot0_eef_pos:
+      shape: [3]
+      type: low_dim
+    robot0_eef_rot_axis_angle:
+      shape: [6]
+      type: low_dim
+      rotation_rep: rotation_6d
+    robot0_eef_wrench:
+      shape: [6]
+      type: low_dim
+    rgb_time_stamps_0:
+      shape: [1]
+      type: timestamp
+    robot_time_stamps_0:
+      shape: [1]
+      type: timestamp
+    wrench_time_stamps_0:
+      shape: [1]
+      type: timestamp
+  action:
+    shape: [19] # 9 reference pose, 9 virtual target, 1 stiffness
+    rotation_rep: rotation_6d
+  sample:
+    obs:
+      sparse:
+        rgb_0:
+          horizon: ${task.sparse_obs_rgb_horizon}
+          down_sample_steps: ${task.sparse_obs_rgb_down_sample_steps}
+        robot0_eef_pos:
+          horizon: ${task.sparse_obs_low_dim_horizon}
+          down_sample_steps: ${task.sparse_obs_low_dim_down_sample_steps}
+        robot0_eef_rot_axis_angle:
+          horizon: ${task.sparse_obs_low_dim_horizon}
+          down_sample_steps: ${task.sparse_obs_low_dim_down_sample_steps}
+        robot0_eef_wrench:
+          horizon: ${task.sparse_obs_wrench_horizon}
+          down_sample_steps: ${task.sparse_obs_wrench_down_sample_steps}
+    action:
+      sparse:
+        horizon: ${task.sparse_action_horizon}
+        down_sample_steps: ${task.sparse_action_down_sample_steps}
+
+
+# what the DP policy and MultiImageObsEncoder see. Only rgb and low_dim types
+# are allowed here -- MultiImageObsEncoder raises on anything else.
+policy_shape_meta: &policy_shape_meta
+  obs:
+    rgb_0:
+      shape: [3, 224, 224]
+      type: rgb
+    robot0_eef_pos:
+      shape: [3]
+      type: low_dim
+    robot0_eef_rot_axis_angle:
+      shape: [6]
+      type: low_dim
+      rotation_rep: rotation_6d
+  action:
+    shape: [9] # pose9: position(3) + rotation_6d(6), relative to the first action frame
+    rotation_rep: rotation_6d
+
+task_name: &task_name wipe_DP
+# folder under CAP6/E1-camaras; also names the run. train_DP.yaml sweeps it.
+dataset_name: gopro177_single
+dataset_path: ${oc.env:PYRITE_DATASET_FOLDERS}/CAP6/E1-camaras/${task.dataset_name}/wipe
+
+dataset:
+  _target_: diffusion_policy.dataset.dp_adapter_dataset.DPAdapterDataset
+  policy_shape_meta: *policy_shape_meta
+  n_obs_steps: ${task.n_obs_steps}
+  inner:
+    _target_: diffusion_policy.dataset.virtual_target_dataset.VirtualTargetDataset
+    shape_meta: *shape_meta
+    dataset_path: ${task.dataset_path}
+    # one training sample per 100 ms step, like upstream (every step is a sample).
+    sparse_query_frequency_down_sample_steps: 3
+    # DEVIATION: upstream pads the action window after the episode end by
+    # n_action_steps-1 = 7 steps, so only the last 0.8 s is never a sample
+    # start. Here False drops the last full action horizon (1.6 s, ~13% of a
+    # 12.4 s wipe demo): those end-of-task frames appear only as action
+    # targets, never as observations. True would avoid that, but the sampler's
+    # True path is broken (sampler.py: episodes_start is only filled in the
+    # False branch, so every index lands past the episode end) and no config
+    # has ever used it.
+    action_padding: False
+    temporally_independent_normalization: False
+    seed: 42
+    val_ratio: 0.05
+    normalize_wrench: True
+    n_demos: null # set to 150, 100, or 50 to subsample; null uses all demos

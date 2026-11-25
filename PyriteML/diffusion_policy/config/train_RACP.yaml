@@ -1,11 +1,12 @@
 defaults:
   - _self_
   #- task: flip_up.yaml
-  #- task: switch
-  - task: wipe.yaml
+  - task: switch.yaml
+  #- task: wipe.yaml
   - override hydra/sweeper: optuna
+  - override hydra/sweeper/sampler: grid
 
-name: $_RACP_full
+name:  $_RACP_full
 output_dir: ${oc.env:PYRITE_CHECKPOINT_FOLDERS}
 _target_: diffusion_policy.workspace.train_diffusion_transformer_image_workspace.TrainDiffusionTransformerImageWorkspace
 
@@ -49,8 +50,8 @@ policy:
     # fraction of each DAT block's output dimension comes from relational
     # attention. sa=0 removes ordinary self-attention entirely, so every DAT
     # layer is pure relational attention over the retrieved symbols.
-    n_heads_sa: 8
-    n_heads_ra: 8
+    n_heads_sa: 4
+    n_heads_ra: 4
     share_attn_params: False
     dat_n_layers: 4
     dat_dff: 2048
@@ -181,7 +182,7 @@ training:
   tqdm_interval_sec: 1.0
 
 logging:
-  project: CAP5-polish
+  project: CAP4
   resume: False
   mode: online
   name: ${now:%Y.%m.%d-%H.%M.%S}_${task_name}_${name}
@@ -206,16 +207,18 @@ hydra:
   sweeper:
     _target_: hydra_plugins.hydra_optuna_sweeper.optuna_sweeper.OptunaSweeper
     direction: minimize
-    n_trials: 2
+    n_trials: 4 # grid sampler caps this at the grid size (one job per subset)
     n_jobs: 1
-    sampler:
-      _target_: optuna.samplers.TPESampler
-      seed: 42
-    params: {}
+    # sampler = grid (see defaults): each value below runs exactly once
+    # CAP4 data efficiency: nested demo subsets (seed 42, see VirtualTargetDataset)
+    params:
+      task.dataset.n_demos: 50,100,150,200
   job:
     override_dirname: ${name}
   run:
     dir: ${output_dir}/${now:%Y.%m.%d}_${now:%H.%M.%S}_${task_name}_${name}
   sweep:
-    dir: ${output_dir}/${now:%Y.%m.%d}_${now:%H.%M.%S}_${task_name}_${name}
-    subdir: ${hydra.job.num}
+    # parent dir is resolved before the sweep overrides, so it must not use
+    # task.name (it would show the default n_demos); each job's subdir does
+    dir: ${output_dir}/${now:%Y.%m.%d}_${now:%H.%M.%S}_${task.task_name}_${name}_multirun
+    subdir: ${hydra.job.num}_${task_name}

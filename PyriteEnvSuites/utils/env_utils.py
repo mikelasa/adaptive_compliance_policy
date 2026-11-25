@@ -39,6 +39,28 @@ def ts_to_js_traj(action_mats, time_steps, robot):
     return LinearInterpolator(time_steps, jpos_waypoints)
 
 
+def pose9_to_traj(action_mats, time_steps):
+    """
+    Args:
+        action_mats: (T, 4, 4) array of task space waypoints.
+        time_steps: (T,) array of time points for each waypoint.
+    Returns:
+        A trajectory over the pose waypoints.
+
+    Counterpart of pose9pose9s1_to_traj for a vision-only policy, whose action
+    is a plain pose command: there is no virtual target and no stiffness to
+    interpolate alongside it.
+    """
+    assert action_mats.shape[1] == 4
+    assert action_mats.shape[2] == 4
+    if action_mats.shape[0] != time_steps.shape[0]:
+        print("action_mats.shape[0]:", action_mats.shape[0])
+        print("time_steps.shape[0]:", time_steps.shape[0])
+        raise ValueError("The number of time steps must match the number of waypoints.")
+
+    return LinearTransformationInterpolator(time_steps, action_mats)
+
+
 def pose9pose9s1_to_traj(target_mats, vt_mats, stiffness, time_steps):
     """
     Args:

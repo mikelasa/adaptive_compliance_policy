@@ -30,6 +30,7 @@ class TimmObsEncoderWithForceCurriculumGated(TimmObsEncoderWithForce):
         vision_encoder_cfg: dict,
         force_encoder_cfg: dict,
         position_encoding: str = "learnable",
+        second_camera: bool = False,
         contact_gate_enabled: bool = False,
         contact_gate_threshold: float = 7.0,
         contact_gate_threshold_high: float = 17.0,
@@ -41,6 +42,7 @@ class TimmObsEncoderWithForceCurriculumGated(TimmObsEncoderWithForce):
             vision_encoder_cfg=vision_encoder_cfg,
             force_encoder_cfg=force_encoder_cfg,
             position_encoding=position_encoding,
+            second_camera=second_camera,
         )
 
         # set by the training workspace loop, train-only, no-op at eval

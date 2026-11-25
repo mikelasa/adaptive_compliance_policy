@@ -404,23 +404,43 @@ def action19_to_action_sample(
 
 def action9_postprocess(
     action: np.ndarray,
-    env_obs: Dict[str, np.ndarray],
+    current_SE3: list,
+    id_list: list,
 ):
     """Convert policy outputs from relative pose to world frame pose
     Used in online inference
+
+    Args:
+        action: (T, 9 * n_arms) relative pose9, as the policy emits it.
+        current_SE3: one 4x4 base transform per arm, as returned by
+            sparse_obs_to_obs_sample (the measured eef pose at query time).
+        id_list: arm ids.
+    Returns:
+        list of (T, 4, 4) absolute pose matrices, one entry per arm.
+
+    The signature mirrors action19_postprocess so that both are reachable
+    through the same `action_postprocess(raw_action, SE3_WBase, id_list)` call
+    in the MPC. It previously took the raw obs dict and derived current_SE3
+    itself, which did not match that call site -- the pose9 branch of
+    ModelPredictiveControllerHybrid would have raised TypeError, so it had
+    never run.
+
+    Note on frames: training makes the action relative to the FIRST ACTION
+    pose, which is the *commanded* pose at query time (action19_to_action_sample
+    uses SE3[0]), while current_SE3 here is the *measured* pose at that same
+    timestamp. The two differ by the instantaneous tracking error. This
+    approximation is inherited, not introduced -- action19_postprocess does the
+    same thing, so ACP already runs with it. It is smaller under
+    POSITION_CONTROLLER, where Franka's internal stiffness tracks the command
+    far more closely than a K=800 N/m impedance spring does.
     """
-    # convert poses to mat
-    current_SE3 = su.pose9_to_SE3(
-        np.concatenate(
-            [env_obs[f"robot0_eef_pos"][-1], env_obs[f"robot0_eef_rot_axis_angle"][-1]],
-            axis=-1,
-        )
-    )
+    action_SE3_absolute = [np.array] * len(id_list)
 
-    action_pose9 = action[..., 0:9]
-    action_SE3 = su.pose9_to_SE3(action_pose9)
+    for id in id_list:
+        action_pose9 = action[..., 9 * id : 9 * id + 9]
+        action_SE3 = su.pose9_to_SE3(action_pose9)
 
-    action_SE3_absolute = current_SE3 @ action_SE3
+        action_SE3_absolute[id] = current_SE3[id] @ action_SE3
 
     # return pose matrices
     return action_SE3_absolute

@@ -1,4 +1,4 @@
-name: wipe_100_demos_txapa_dual_cam
+name: wipe_${task.dataset_name}_300
 
 # rgb vs. low_dim: raw data are either rgb images or low_dim vectors. frames are aligned within each type.
 # obs vs. action: obs data are used as policy input; action are used as labels for policy output.
@@ -122,8 +122,11 @@ shape_meta: &shape_meta
         down_sample_steps: ${task.sparse_action_down_sample_steps} # int
 
 
-task_name: &task_name wipe
-dataset_path: ${oc.env:PYRITE_DATASET_FOLDERS}/CAP6-DEMOS/E1_minimum_demos/wipe_dual_camera
+task_name: &task_name wipe_dual_camera
+# folder under CAP6/E2-DCAM; also names the run. Must be a *_dual set
+# (processed with TWO_CAMERAS=True, so it holds rgb_1).
+dataset_name: gopro177_dual
+dataset_path: ${oc.env:PYRITE_DATASET_FOLDERS}/CAP6/E2-DCAM/${task.dataset_name}/wipe
 
 env_runner: # used in workspace for computing metrics
   _target_: diffusion_policy.env_runner.real_pusht_image_runner.RealPushTImageRunner
@@ -139,4 +142,4 @@ dataset:
   seed: 42
   val_ratio: 0.05
   normalize_wrench: True
-  n_demos: 100 # set to 150, 100, or 50 to subsample; null uses all demos
+  n_demos: null # set to 150, 100, or 50 to subsample; null uses all demos

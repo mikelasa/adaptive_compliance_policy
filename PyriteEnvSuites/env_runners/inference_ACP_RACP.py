@@ -1,5 +1,6 @@
 import sys
 import os
+import argparse
 from typing import Dict, Callable, Tuple, List
 
 SCRIPT_PATH = os.path.abspath(os.path.dirname(__file__))
@@ -11,6 +12,7 @@ import torch
 import time
 import matplotlib.pyplot as plt
 import zarr
+import yaml
 import spatialmath as sm
 from collections import deque
 
@@ -167,6 +169,15 @@ def _blend_chunk_boundary(prev_chunk, blend_window, nominal, virtual, stiffness)
 
 
 def main():
+    # Pick the model at launch instead of editing ckpt_path below:
+    #   python inference_with_logging_worldframe.py --ckpt <run folder or .ckpt>
+    # relative to $PYRITE_CHECKPOINT_FOLDERS (or absolute under it). A run
+    # folder means its checkpoints/latest.ckpt. Without --ckpt, the
+    # ckpt_path written in pipeline_para is used, as before.
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--ckpt", default=None, help="checkpoint to run")
+    args = parser.parse_args()
+
     control_para = {
         "raw_time_step_s": 0.001,  # dt of raw data collection. Used to compute time step from time_s such that the downsampling according to shape_meta works.
         "slow_down_factor": 2,  # 3 for flipup, 1.5 for wiping
@@ -178,16 +189,37 @@ def main():
     pipeline_para = {
         "save_low_dim_every_N_frame": 1,
         "save_visual_every_N_frame": 1,
-        #"ckpt_path": "/switch/200/2026.09.29-12.41.41_RACP_full_200_demos/checkpoints/latest.ckpt",
-        "ckpt_path": "/CAP5/2026.10.27_19.33.33_wipe_300_demos_txapa_todo_$_RACP_full/checkpoints/latest.ckpt",
+        #"ckpt_path": "/CAP4/flip/2026.09.16-22.20.09_ACP_Unet_full/checkpoints/latest.ckpt",
+        "ckpt_path": "/2026.11.19_08.35.44_switch_50_demos_RACP_SWITCH_$_RACP_full/checkpoints/latest.ckpt",
+        #"ckpt_path": "/CAP6/E1-camaras/dual_camera/2026.11.08_22.44.22_flipup_100_demos_gopro177_DCAM_ACP_Baseline/checkpoints/latest.ckpt",
         # "hardware_config_path": hardware_config_folder_path + "/manip_server_config_left_arm.yaml", episode_1778754577
         "hardware_config_path": hardware_config_folder_path
         + "/single_arm_data_collection_franka.yaml",
         # separate from inference_with_logging.py's "/temp/": zarr opens the
         # log with mode="w", so sharing the path would wipe the tool-frame
         # baseline run that this variant is meant to be compared against.
+        # Each launch logs into its own <date>_<run name>/ subfolder here, one
+        # episode_<id>.zarr per episode (as inference_with_logging_DP.py does),
+        # so trials of different checkpoints are kept side by side.
         "control_log_path": control_log_folder_path + "/temp_worldframe/",
+        # also log, per horizon, the camera frames the policy received and the
+        # full robot pose / raw wrench buffers, all with their hardware
+        # timestamps: enough to compare trial images against the training
+        # data and to measure camera latency in closed loop.
+        "log_observations": True,
     }
+    if args.ckpt is not None:
+        ckpt = args.ckpt
+        root = checkpoint_folder_path.rstrip("/")
+        if os.path.isabs(ckpt) and ckpt.startswith(root + "/"):
+            ckpt = ckpt[len(root):]
+        if not ckpt.endswith(".ckpt"):
+            ckpt = ckpt.rstrip("/") + "/checkpoints/latest.ckpt"
+        pipeline_para["ckpt_path"] = "/" + ckpt.lstrip("/")
+    if not os.path.isfile(checkpoint_folder_path + pipeline_para["ckpt_path"]):
+        raise FileNotFoundError(
+            "Checkpoint not found: " + checkpoint_folder_path + pipeline_para["ckpt_path"]
+        )
     force_filtering_para = {
         "sampling_freq": 1000,
         "cutoff_freq": 5,
@@ -390,9 +422,24 @@ def main():
         _ax_t.set_xlim(0, max(_force_window, len(_torque_norm_history)))
         _fig_f.canvas.flush_events()
 
-    # log
-    log_store = zarr.DirectoryStore(path=pipeline_para["control_log_path"])
-    log = zarr.open(store=log_store, mode="w")  # w: overrite if exists
+    # log: one folder per launch, named after the checkpoint's training run,
+    # holding one episode_<id>.zarr per episode (opened in the episode loop).
+    # Nothing is opened with mode="w" at the top level any more, so earlier
+    # launches are never wiped.
+    ckpt_run_name = pipeline_para["ckpt_path"].split("/checkpoints/")[0].strip("/")
+    run_log_dir = os.path.join(
+        pipeline_para["control_log_path"],
+        time.strftime("%Y.%m.%d_%H.%M.%S_") + ckpt_run_name.replace("/", "__"),
+    )
+    os.makedirs(run_log_dir, exist_ok=True)
+    print("Logging episodes to: ", run_log_dir)
+
+    # history lengths kept by the manip server: the whole buffer is logged
+    # every horizon so consecutive horizons overlap with no gap in between
+    with open(pipeline_para["hardware_config_path"]) as f:
+        hardware_config = yaml.safe_load(f)
+    robot_log_size = hardware_config["robot_buffer_size"]
+    wrench_log_size = hardware_config["wrench_buffer_size"]
 
     horizon_count = 0
     print("test plotting RGB. Press q to continue.")
@@ -424,6 +471,15 @@ def main():
         input("Press Enter to start the episode.")
         # killer handles graceful shutdown
         killer = GracefulKiller()
+
+        # open the per-episode log
+        log = zarr.open(
+            os.path.join(run_log_dir, f"episode_{episode_id}.zarr"), mode="w"
+        )
+        log.attrs["ckpt_path"] = pipeline_para["ckpt_path"]
+        log.attrs["hardware_config_path"] = pipeline_para["hardware_config_path"]
+        log.attrs["control_para"] = control_para
+        horizon_count = 0
         # Boundary-blend state (see _blend_chunk_boundary): the previous
         # cycle's post-blend (actually-sent) chunk, per id. Scoped to this
         # episode's while-loop so it's automatically None again at the start
@@ -724,6 +780,42 @@ def main():
                 stiffness_matrices_6x6=outputs_ts_stiffnesses,
                 timestamps=(timestamps + action_start_time_s) * 1000,
             )
+
+            # log what the policy saw (after scheduling, so it adds no delay to
+            # the commands). obs_raw rgb is the env's reused output buffer, so
+            # it is copied. get_pose/get_wrench overwrite the server's stored
+            # timestamps, which is why they are read only now, after the
+            # policy's observation has been taken.
+            if pipeline_para["log_observations"]:
+                horizon_log.create_dataset(
+                    "obs_hardware_time_s", data=horizon_initial_time_s
+                )
+                for cam_id in camera_id_list:
+                    horizon_log.create_dataset(
+                        f"rgb_{cam_id}", data=np.array(obs_raw[f"rgb_{cam_id}"]),
+                        chunks=(1, None, None, None),
+                    )
+                    horizon_log.create_dataset(
+                        f"rgb_time_stamps_{cam_id}",
+                        data=np.array(obs_raw[f"rgb_time_stamps_{cam_id}"]),
+                    )
+                for id in id_list:
+                    horizon_log.create_dataset(
+                        f"ts_pose_fb_stream_{id}",
+                        data=env.server.get_pose(robot_log_size, id).transpose(),
+                    )
+                    horizon_log.create_dataset(
+                        f"robot_time_stamps_stream_{id}",
+                        data=env.server.get_pose_timestamps_ms(id) / 1000,
+                    )
+                    horizon_log.create_dataset(
+                        f"wrench_raw_stream_{id}",
+                        data=env.server.get_wrench(wrench_log_size, id).transpose(),
+                    )
+                    horizon_log.create_dataset(
+                        f"wrench_time_stamps_stream_{id}",
+                        data=env.server.get_wrench_timestamps_ms(id) / 1000,
+                    )
 
             # # log the truncated action
             # horizon_log = log.create_group(f"horizon_{horizon_count}")

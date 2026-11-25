@@ -76,10 +76,17 @@ class TimmObsEncoderWithForce(ModuleAttrMixin):
         # renormalize rgb input with imagenet normalization
         # assuming input in [0,1]
         position_encoding: str = "learnable",
+        second_camera: bool = False,
     ):
         """
         Assumes rgb input: B,T,C,H,W
         Assumes low_dim input: B,T,D
+
+        second_camera: same switch as TimmObsEncoderBiCrossDATTransformer
+        (RACP). False keeps only the first rgb key in shape_meta (rgb_0) and
+        drops the rest; True encodes every rgb key, each with its own vision
+        backbone unless share_rgb_model. Default False so every existing
+        single-camera checkpoint rebuilds with the same architecture.
         """
         super().__init__()
 
@@ -187,6 +194,8 @@ class TimmObsEncoderWithForce(ModuleAttrMixin):
             type = attr.get("type", "low_dim")
             key_shape_map[key] = shape
             if type == "rgb":
+                if rgb_keys and not second_camera:
+                    continue
                 rgb_keys.append(key)
 
                 vision_encoder = (

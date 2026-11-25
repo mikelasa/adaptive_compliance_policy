@@ -78,10 +78,30 @@ class ManipServerEnv:
         default_stiffness = [5000, 5000, 5000, 100, 100, 100]
         default_stiffness = np.diag(default_stiffness)
 
+        # Which controller the workcell config selected. POSITION_CONTROLLER
+        # owns no stiffness and position-controls every axis, so both compliance
+        # calls below are no-ops there and the C++ side warns on each one.
+        # Skipping them keeps the startup output honest: under that controller
+        # the force ceiling comes from the position_controller tracking leash in
+        # the workcell yaml, not from anything set here.
+        #
+        # getattr keeps this working against a libManipServer built before
+        # get_controller_selection() existed.
+        get_selection = getattr(server, "get_controller_selection", None)
+        controller_selection = get_selection() if get_selection else "IMPEDANCE_CONTROLLER"
+        print(f"[ManipServerEnv] controller_selection: {controller_selection}")
+        set_compliance = controller_selection != "POSITION_CONTROLLER"
+        if not set_compliance:
+            print(
+                "[ManipServerEnv] skipping set_force_controlled_axis / "
+                "set_stiffness_matrix: POSITION_CONTROLLER has no compliance to set."
+            )
+
         ft_filter = []
         for id in id_list:
-            server.set_force_controlled_axis(Tr, n_af, id)
-            server.set_stiffness_matrix(default_stiffness, id)
+            if set_compliance:
+                server.set_force_controlled_axis(Tr, n_af, id)
+                server.set_stiffness_matrix(default_stiffness, id)
             ft_filter.append(
                 LiveLPFilter(
                     fs=filter_params["sampling_freq"],

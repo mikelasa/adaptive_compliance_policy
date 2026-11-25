@@ -80,16 +80,16 @@ def image_read(rgb_dir, rgb_file_list, i, output_data_rgb, output_data_rgb_time_
 
 
 # specify the input and output directories
-TWO_CAMERAS = False  # set True to include second camera (camera_id=1)
+TWO_CAMERAS = True  # set True to include second camera (camera_id=1)
 
 id_list = [0]  # single robot
 # id_list = [0, 1] # bimanual
 camera_id_list = [0, 1] if TWO_CAMERAS else [0]
 
 input_dir = pathlib.Path(
-    os.environ.get("PYRITE_RAW_DATASET_FOLDERS") + "/CAP5/curva"
+    os.environ.get("PYRITE_RAW_DATASET_FOLDERS") + "/CAP6/E1-camaras/gopro177/flipup"
 )
-output_dir = pathlib.Path(os.environ.get("PYRITE_DATASET_FOLDERS") + "/CAP5/todo")
+output_dir = pathlib.Path(os.environ.get("PYRITE_DATASET_FOLDERS") + "/CAP6/E2-DCAM/gopro177_dual/flipup")
 
 robot_timestamp_dir = output_dir.joinpath("robot_timestamp")
 wrench_timestamp_dir = output_dir.joinpath("wrench_timestamp")

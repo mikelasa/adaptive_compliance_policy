@@ -27,7 +27,7 @@ if "PYRITE_DATASET_FOLDERS" not in os.environ:
 dataset_folder_path = os.environ.get("PYRITE_DATASET_FOLDERS")
 
 # Config for flip up (single robot)
-dataset_path = dataset_folder_path + "/CAP5/curva"
+dataset_path = dataset_folder_path + "/CAP6/E2-DCAM/gopro177_dual/flipup"
 id_list = [0]
 
 # # Config for vase wiping (bimanual)
@@ -48,7 +48,7 @@ stiffness_estimation_para = {
     "k_max": 2000,  # 1cm 50N maximum stiffness
     "k_min": 500,  # 1cm 2.5N minimum stiffness
     "f_low": 10, #lower bound of the force
-    "f_high": 18,  #upper bound of the force
+    "f_high": 20,  #upper bound of the force
     "max_disp": 0.034,  #
     "dim": 6,
     "characteristic_length": 1,

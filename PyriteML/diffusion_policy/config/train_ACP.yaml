@@ -1,8 +1,12 @@
 defaults:
   - _self_
   - task: flip_up.yaml
-  #- task: switch
+  #- task: switch.yaml
+  #- task: wipe
+  #- task: flip_up_dual_camera
+  #- task: wipe_dual_camera
   - override hydra/sweeper: optuna
+  - override hydra/sweeper/sampler: grid
 
 name: ACP_Baseline
 output_dir: ${oc.env:PYRITE_CHECKPOINT_FOLDERS}
@@ -34,6 +38,10 @@ policy:
     _target_: diffusion_policy.model.vision.timm_obs_encoder_with_force_curriculum_gated.TimmObsEncoderWithForceCurriculumGated
     shape_meta: ${shape_meta}
     fuse_mode: modality-attention
+    # True = also encode rgb_1 (needs a *_dual_camera task: camera_id_list
+    # [0, 1] and rgb_1 declared in raw/obs/sample). False drops every rgb key
+    # past rgb_0 even if the task declares it. Same flag as train_RACP*.yaml.
+    second_camera: True
     reduce_pretrained_lr: True
     position_encoding: learnable
 
@@ -117,14 +125,14 @@ ema:
   max_value: 0.9999
 
 dataloader:
-  batch_size: 128
+  batch_size: 32
   num_workers: 32 #32 falla por memoria
   shuffle: True
   pin_memory: True
   persistent_workers: false
 
 val_dataloader:
-  batch_size: 128
+  batch_size: 32
   num_workers: 32
   shuffle: False
   pin_memory: True
@@ -149,7 +157,7 @@ training:
 
   log_gradient_norm: False
 
-  gradient_accumulate_every: 1
+  gradient_accumulate_every: 4
   # EMA destroys performance when used with BatchNorm
   # replace BatchNorm with GroupNorm.
   use_ema: True
@@ -168,7 +176,7 @@ training:
 
 
 logging:
-  project: E1_minimum_demos
+  project: CAP4
   resume: False
   mode: online
   name: ${now:%Y.%m.%d-%H.%M.%S}_${task_name}_${name}
@@ -194,20 +202,20 @@ hydra:
     _target_: hydra_plugins.hydra_optuna_sweeper.optuna_sweeper.OptunaSweeper
 
     direction: minimize
-    n_trials: 4 #number of HPO trials to test
+    n_trials: 4 # grid sampler caps this at the grid size (one job per subset)
     n_jobs: 1 #in GPU use 1
 
-    sampler:
-      _target_: optuna.samplers.TPESampler
-      seed: 42
-
+    # sampler = grid (see defaults): each value below runs exactly once
+    # CAP4 data efficiency: nested demo subsets (seed 42, see VirtualTargetDataset)
     params:
-      task.dataset_path: "${oc.env:PYRITE_DATASET_FOLDERS}/flip_up_230_original,${oc.env:PYRITE_DATASET_FOLDERS}/flip_up_230"
+      task.dataset.n_demos: 50,100,150,200
 
   job:
     override_dirname: ${name}
   run:
     dir: ${output_dir}/${now:%Y.%m.%d}_${now:%H.%M.%S}_${task_name}_${name}
   sweep:
-    dir: ${output_dir}/${now:%Y.%m.%d}_${now:%H.%M.%S}_${task_name}_${name}
-    subdir: ${hydra.job.num}
+    # parent dir is resolved before the sweep overrides, so it must not use
+    # task.name (it would show the default dataset); each job's subdir does
+    dir: ${output_dir}/${now:%Y.%m.%d}_${now:%H.%M.%S}_${task.task_name}_${name}_multirun
+    subdir: ${hydra.job.num}_${task_name}

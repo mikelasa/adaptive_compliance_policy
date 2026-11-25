@@ -81,11 +81,14 @@ class VirtualTargetDataset(BaseDataset):
         self.id_list = shape_meta["id_list"]
 
         # randomly select n_demos episodes using seed for reproducibility;
-        # sorted keys + same seed guarantees nested subsets across runs
+        # sorted keys + same seed + taking a prefix of ONE permutation guarantees
+        # nested subsets across runs (50 in 100 in 150 in 200). rng.choice(...,
+        # replace=False) was used before 2026-11-18 and is NOT nested: its
+        # 100/150/200 picks differ from a prefix of the same permutation.
         all_episode_keys = sorted(replay_buffer_raw["data"].keys())
         if n_demos is not None and n_demos < len(all_episode_keys):
             rng = np.random.default_rng(seed)
-            selected_indices = rng.choice(len(all_episode_keys), size=n_demos, replace=False)
+            selected_indices = rng.permutation(len(all_episode_keys))[:n_demos]
             selected_keys = [all_episode_keys[i] for i in sorted(selected_indices)]
             print(f"[VirtualTargetDataset] using {n_demos}/{len(all_episode_keys)} demos")
         else:
@@ -144,7 +147,11 @@ class VirtualTargetDataset(BaseDataset):
                 replay_buffer_raw["data"][ep], replay_buffer["data"][ep], shape_meta
             )
             if self.action_type == "pose9":
-                raw_to_action9(replay_buffer_raw["data"][ep], replay_buffer["data"][ep])
+                raw_to_action9(
+                    replay_buffer_raw["data"][ep],
+                    replay_buffer["data"][ep],
+                    self.id_list,
+                )
             elif self.action_type == "pose9pose9s1":
                 raw_to_action19(
                     replay_buffer_raw["data"][ep],
@@ -254,22 +261,30 @@ class VirtualTargetDataset(BaseDataset):
         def _slice_stat(stat, a, b):
             return {k: v[..., a:b] for k, v in stat.items()}
 
+        # Per-arm action width depends on action_type: pose9 stores only the
+        # nominal pose command, pose9pose9s1 appends the virtual target and the
+        # stiffness. The stride has to match, or a 9-dim action gets sliced past
+        # its end and the extra normalizers come back empty.
+        stride = 9 if self.action_type == "pose9" else 19
+
         for i in range(len(self.id_list)):
+            base = i * stride
             sparse_action_normalizers.append(
-                get_range_normalizer_from_stat(_slice_stat(action_stats, i * 19 + 0, i * 19 + 3))
+                get_range_normalizer_from_stat(_slice_stat(action_stats, base + 0, base + 3))
             )  # pos
             sparse_action_normalizers.append(
-                get_identity_normalizer_from_stat(_slice_stat(action_stats, i * 19 + 3, i * 19 + 9))
+                get_identity_normalizer_from_stat(_slice_stat(action_stats, base + 3, base + 9))
             )  # rot
-            sparse_action_normalizers.append(
-                get_range_normalizer_from_stat(_slice_stat(action_stats, i * 19 + 9, i * 19 + 12))
-            )  # pos
-            sparse_action_normalizers.append(
-                get_identity_normalizer_from_stat(_slice_stat(action_stats, i * 19 + 12, i * 19 + 18))
-            )  # rot
-            sparse_action_normalizers.append(
-                get_range_normalizer_from_stat(_slice_stat(action_stats, i * 19 + 18, i * 19 + 19))
-            )  # stiffness
+            if self.action_type == "pose9pose9s1":
+                sparse_action_normalizers.append(
+                    get_range_normalizer_from_stat(_slice_stat(action_stats, base + 9, base + 12))
+                )  # pos, virtual target
+                sparse_action_normalizers.append(
+                    get_identity_normalizer_from_stat(_slice_stat(action_stats, base + 12, base + 18))
+                )  # rot, virtual target
+                sparse_action_normalizers.append(
+                    get_range_normalizer_from_stat(_slice_stat(action_stats, base + 18, base + 19))
+                )  # stiffness
 
         sparse_normalizer["action"] = concatenate_normalizer(sparse_action_normalizers)
 

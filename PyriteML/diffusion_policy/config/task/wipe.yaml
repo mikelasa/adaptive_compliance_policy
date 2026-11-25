@@ -1,4 +1,4 @@
-name: wipe_150_demos_txapa_curva
+name: wipe_${task.dataset_name}_300
 
 # rgb vs. low_dim: raw data are either rgb images or low_dim vectors. frames are aligned within each type.
 # obs vs. action: obs data are used as policy input; action are used as labels for policy output.
@@ -117,7 +117,9 @@ shape_meta: &shape_meta
 
 
 task_name: &task_name wipe
-dataset_path: ${oc.env:PYRITE_DATASET_FOLDERS}/CAP5/curva
+# folder under CAP6/E1-camaras; also names the run. train_ACP.yaml sweeps it.
+dataset_name: realsense86_single
+dataset_path: ${oc.env:PYRITE_DATASET_FOLDERS}/CAP6/E1-camaras/${task.dataset_name}/wipe
 
 env_runner: # used in workspace for computing metrics
   _target_: diffusion_policy.env_runner.real_pusht_image_runner.RealPushTImageRunner
